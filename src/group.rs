@@ -25,7 +25,7 @@ impl<T, A: Allocator> Group<T, A> {
     pub(crate) fn compute_slot_size() -> usize {
         let min_size = core::cmp::max(size_of::<T>(), 2 * size_of::<u16>());
         let align = align_of::<T>();
-        (min_size + align - 1) / align * align
+        min_size.div_ceil(align) * align
     }
 
     pub(crate) fn compute_allocation_size(capacity: u16, slot_size: usize) -> usize {

@@ -20,6 +20,7 @@ unsafe fn write_prev(element_base: *mut u8, slot_size: usize, index: u16, prev: 
     unsafe { *(slot_addr(element_base, slot_size, index) as *mut u16) = prev; }
 }
 
+#[allow(dead_code)]
 unsafe fn write_next(element_base: *mut u8, slot_size: usize, index: u16, next: u16) {
     unsafe { *((slot_addr(element_base, slot_size, index) as *mut u16).add(1)) = next; }
 }
@@ -51,6 +52,7 @@ pub(crate) unsafe fn pop_free_slot<T, A: Allocator>(mut group: NonNull<Group<T, 
     idx
 }
 
+#[allow(dead_code)]
 pub(crate) unsafe fn remove_from_free_list<T, A: Allocator>(
     mut group: NonNull<Group<T, A>>,
     index: u16,
@@ -67,6 +69,7 @@ pub(crate) unsafe fn remove_from_free_list<T, A: Allocator>(
     write_links(base, ss, index, u16::MAX, u16::MAX);
 }
 
+#[allow(dead_code)]
 pub(crate) unsafe fn replace_in_free_list<T, A: Allocator>(
     mut group: NonNull<Group<T, A>>,
     old_index: u16,

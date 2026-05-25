@@ -21,9 +21,11 @@ impl<T, A: Allocator> Clone for Cursor<T, A> {
 impl<T, A: Allocator> Copy for Cursor<T, A> {}
 
 impl<T, A: Allocator> Cursor<T, A> {
+    #[allow(dead_code)]
     pub fn null() -> Self {
         Self { group: None, element: core::ptr::null(), skipfield: core::ptr::null(), _marker: PhantomData }
     }
+    #[allow(dead_code)]
     pub fn is_null(&self) -> bool { self.group.is_none() }
 
     pub unsafe fn advance_forward(&self) -> Cursor<T, A> {
