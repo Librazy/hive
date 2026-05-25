@@ -30,58 +30,58 @@ unsafe fn write_links(element_base: *mut u8, slot_size: usize, index: u16, prev:
     unsafe { *ptr = prev; *ptr.add(1) = next; }
 }
 
-pub(crate) unsafe fn push_free_slot<T, A: Allocator>(mut group: NonNull<Group<T, A>>, index: u16) {
-    let g = group.as_mut();
+pub(crate) unsafe fn push_free_slot<T, A: Allocator>(group: NonNull<Group<T, A>>, index: u16) {
+    let g = group.as_ref();
     let base = g.elements_base();
     let ss = g.slot_size;
-    let old = g.free_list_head;
+    let old = g.free_list_head.get();
     write_links(base, ss, index, u16::MAX, old);
     if old != u16::MAX { write_prev(base, ss, old, index); }
-    g.free_list_head = index;
+    g.free_list_head.set(index);
 }
 
-pub(crate) unsafe fn pop_free_slot<T, A: Allocator>(mut group: NonNull<Group<T, A>>) -> u16 {
-    let g = group.as_mut();
+pub(crate) unsafe fn pop_free_slot<T, A: Allocator>(group: NonNull<Group<T, A>>) -> u16 {
+    let g = group.as_ref();
     let base = g.elements_base();
     let ss = g.slot_size;
-    let idx = g.free_list_head;
+    let idx = g.free_list_head.get();
     debug_assert_ne!(idx, u16::MAX);
     let next_idx = read_next(base, ss, idx);
     if next_idx != u16::MAX { write_prev(base, ss, next_idx, u16::MAX); }
-    g.free_list_head = next_idx;
+    g.free_list_head.set(next_idx);
     idx
 }
 
 #[allow(dead_code)]
 pub(crate) unsafe fn remove_from_free_list<T, A: Allocator>(
-    mut group: NonNull<Group<T, A>>,
+    group: NonNull<Group<T, A>>,
     index: u16,
     prev_idx: u16,
     next_idx: u16,
 ) {
-    let g = group.as_mut();
+    let g = group.as_ref();
     let base = g.elements_base();
     let ss = g.slot_size;
     if prev_idx != u16::MAX { write_next(base, ss, prev_idx, next_idx); }
     if next_idx != u16::MAX { write_prev(base, ss, next_idx, prev_idx); }
-    else if prev_idx != u16::MAX { g.free_list_head = prev_idx; write_next(base, ss, prev_idx, u16::MAX); }
-    else { g.free_list_head = u16::MAX; }
+    else if prev_idx != u16::MAX { g.free_list_head.set(prev_idx); write_next(base, ss, prev_idx, u16::MAX); }
+    else { g.free_list_head.set(u16::MAX); }
     write_links(base, ss, index, u16::MAX, u16::MAX);
 }
 
 #[allow(dead_code)]
 pub(crate) unsafe fn replace_in_free_list<T, A: Allocator>(
-    mut group: NonNull<Group<T, A>>,
+    group: NonNull<Group<T, A>>,
     old_index: u16,
     new_index: u16,
 ) {
-    let g = group.as_mut();
+    let g = group.as_ref();
     let base = g.elements_base();
     let ss = g.slot_size;
     let prev = read_next(base, ss, old_index);
     let next = read_next(base, ss, old_index);
     write_links(base, ss, new_index, prev, next);
     if prev != u16::MAX { write_next(base, ss, prev, new_index); }
-    else { g.free_list_head = new_index; }
+    else { g.free_list_head.set(new_index); }
     if next != u16::MAX { write_prev(base, ss, next, new_index); }
 }

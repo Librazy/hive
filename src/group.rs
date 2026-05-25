@@ -1,6 +1,7 @@
 //! Internal group (block) type for the hive.
 
 use core::alloc::{Allocator, Layout};
+use core::cell::Cell;
 use core::mem::{align_of, size_of};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -13,9 +14,9 @@ pub(crate) struct Group<T, A: Allocator> {
     pub(crate) prev: Option<NonNull<Group<T, A>>>,
     pub(crate) erasures_next: Option<NonNull<Group<T, A>>>,
     pub(crate) erasures_prev: Option<NonNull<Group<T, A>>>,
-    pub(crate) free_list_head: u16,
+    pub(crate) free_list_head: Cell<u16>,
     pub(crate) capacity: u16,
-    pub(crate) active_count: u16,
+    pub(crate) active_count: Cell<u16>,
     pub(crate) group_number: usize,
     pub(crate) allocator: A,
     pub(crate) _marker: PhantomData<T>,
@@ -52,10 +53,8 @@ impl<T, A: Allocator> Group<T, A> {
         let alloc_block = allocator.allocate(elem_layout)
             .expect("hive: element block allocation failed");
 
-        // Get thin pointer to u8
         let allocation: NonNull<u8> = alloc_block.cast::<u8>();
 
-        // Zero-initialize skipfield
         let skipfield_base = unsafe {
             allocation.as_ptr().add(slot_size * capacity as usize) as *mut u16
         };
@@ -71,9 +70,9 @@ impl<T, A: Allocator> Group<T, A> {
             prev,
             erasures_next: None,
             erasures_prev: None,
-            free_list_head: u16::MAX,
+            free_list_head: Cell::new(u16::MAX),
             capacity,
-            active_count: 0,
+            active_count: Cell::new(0),
             group_number,
             allocator,
             _marker: PhantomData,
@@ -109,8 +108,8 @@ impl<T, A: Allocator> Group<T, A> {
         g.prev = prev;
         g.erasures_next = None;
         g.erasures_prev = None;
-        g.free_list_head = u16::MAX;
-        g.active_count = 0;
+        g.free_list_head.set(u16::MAX);
+        g.active_count.set(1);
         g.group_number = group_number;
         let sf = g.skipfield_mut();
         core::ptr::write_bytes(sf, 0, g.capacity as usize);
@@ -139,7 +138,7 @@ impl<T, A: Allocator> Group<T, A> {
     }
 
     pub(crate) fn is_full(&self) -> bool {
-        self.active_count == self.capacity
+        self.active_count.get() == self.capacity
     }
 
     pub(crate) unsafe fn index_from_element_ptr(&self, ptr: *const u8) -> u16 {
