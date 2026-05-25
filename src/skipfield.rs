@@ -173,54 +173,70 @@ pub(crate) unsafe fn mark_constructed<T, A: Allocator>(group: NonNull<Group<T, A
     debug_assert_ne!(skip_val, 0, "mark_constructed on non-erased slot");
 
     if skip_val == 1 {
-        // Solo erased slot
         *sf.add(index as usize) = 0;
         return;
     }
 
-    // Multi-element run. Determine position: start, end, or interior (merge case).
-    let following_value = skip_val + 1;
+    let capacity = g.capacity as usize;
+    let idx = index as usize;
+    let n = skip_val as usize;
 
-    if (index as usize) + following_value as usize >= g.capacity as usize {
-        // End of a skipblock (run)
-        *sf.add(index as usize) = 0;
+    // Check if this slot is the START of the run (has matching end boundary at idx+n-1)
+    let is_start = n > 1
+        && idx + n <= capacity + 1  // idx+n-1 < capacity
+        && idx + n >= 1             // idx+n-1 >= 0
+        && idx + n - 1 < capacity
+        && *sf.add(idx + n - 1) == skip_val;
+
+    // Check if this slot is the END of the run (has matching start boundary at idx+1-n)
+    let is_end = n > 1
+        && idx + 1 >= n  // idx - n + 1 >= 0
+        && *sf.add(idx + 1 - n) == skip_val;
+
+    if is_start && !is_end {
+        // Remove from start: shrink run rightward
+        *sf.add(idx) = 0;
         let new_val = skip_val - 1;
         if new_val > 0 {
-            *sf.add(index as usize - skip_val as usize + 1) = new_val;
-            *sf.add(index as usize - 1) = new_val;
+            let end_idx = idx + n - 1;
+            *sf.add(end_idx) = new_val;
+            if n > 2 {
+                *sf.add(idx + 1) = new_val;
+            }
         }
-    } else if *sf.add(index as usize + skip_val as usize) == skip_val {
-        // Start of a skipblock — the matching boundary value is at index+skip_val
-        *sf.add(index as usize) = 0;
+    } else if is_end && !is_start {
+        // Remove from end: shrink run leftward
+        *sf.add(idx) = 0;
         let new_val = skip_val - 1;
         if new_val > 0 {
-            *sf.add(index as usize + skip_val as usize - 1) = new_val;
-            *sf.add(index as usize + 1) = new_val;
+            let start_idx = idx - n + 1;
+            *sf.add(start_idx) = new_val;
+            if n > 2 {
+                *sf.add(idx - 1) = new_val;
+            }
         }
+    } else if is_start && is_end {
+        // n == 2 run, both slots are boundaries — became a single slot, but skip_val != 1
+        // shouldn't reach here normally, but handle gracefully
+        *sf.add(idx) = 0;
     } else {
-        // Interior: merge two skipblocks around the removed slot
-        // Find the left run end boundary
-        let mut left_run_end = index as usize - 1;
-        // Walk left to find the non-zero boundary value
-        while *sf.add(left_run_end) == 0 {
-            left_run_end -= 1;
+        // Interior — remove from middle, merge remaining left+right runs
+        let mut left_idx = idx - 1;
+        while left_idx > 0 && *sf.add(left_idx) == 0 {
+            left_idx -= 1;
         }
-        let left_val = *sf.add(left_run_end);
-        let left_start = left_run_end - left_val as usize + 1;
-
-        // Find the right run start boundary  
-        let mut right_run_start = index as usize + 1;
-        while *sf.add(right_run_start) == 0 {
-            right_run_start += 1;
+        let left_start_val = *sf.add(left_idx);
+        let mut right_idx = idx + 1;
+        while right_idx < capacity && *sf.add(right_idx) == 0 {
+            right_idx += 1;
         }
-        let right_val = *sf.add(right_run_start);
-        let right_end = right_run_start + right_val as usize - 1;
+        let right_end_val = *sf.add(right_idx);
 
-        // The slot at index is being reused, set it to 0
-        *sf.add(index as usize) = 0;
+        *sf.add(idx) = 0;
+        let merged_len = left_start_val + right_end_val;
+        let left_start = left_idx - left_start_val as usize + 1;
+        let right_end = right_idx;
 
-        // The two remaining runs merge: length = left_val + right_val
-        let merged_len = left_val + right_val;
         *sf.add(left_start) = merged_len;
         *sf.add(right_end) = merged_len;
     }
