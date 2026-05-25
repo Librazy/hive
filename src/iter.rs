@@ -1,13 +1,17 @@
 //! Iterator types for `Hive`: `Iter`, `IterMut`, `IntoIter`.
 
+use crate::group::Group;
+use crate::skipfield::Cursor;
 use core::alloc::Allocator;
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
-use crate::skipfield::Cursor;
+use core::ptr::NonNull;
 
 macro_rules! iter_next {
     ($self:expr, $front:ident, $as_type:expr) => {{
-        if $self.remaining == 0 { return None; }
+        if $self.remaining == 0 {
+            return None;
+        }
         $self.remaining -= 1;
         let result = $as_type;
         if $self.remaining > 0 {
@@ -19,21 +23,38 @@ macro_rules! iter_next {
 
 macro_rules! iter_next_back {
     ($self:expr, $back:ident, $as_type:expr) => {{
-        if $self.remaining == 0 { return None; }
+        if $self.remaining == 0 {
+            return None;
+        }
         $self.remaining -= 1;
-        $self.$back = unsafe { $self.$back.advance_backward() };
-        Some($as_type)
+        let result = $as_type;
+        if $self.remaining > 0 {
+            $self.$back = unsafe { $self.$back.advance_backward() };
+        }
+        Some(result)
     }};
 }
 
 pub struct Iter<'a, T: 'a, A: Allocator + 'a> {
-    front: Cursor<T, A>, back: Cursor<T, A>, remaining: usize,
+    front: Cursor<T, A>,
+    back: Cursor<T, A>,
+    remaining: usize,
     _marker: PhantomData<&'a T>,
 }
 
 impl<'a, T, A: Allocator> Iter<'a, T, A> {
     pub(crate) unsafe fn new(begin: Cursor<T, A>, end: Cursor<T, A>, len: usize) -> Self {
-        Self { front: begin, back: end, remaining: len, _marker: PhantomData }
+        let back = if len == 0 {
+            end
+        } else {
+            end.advance_backward()
+        };
+        Self {
+            front: begin,
+            back,
+            remaining: len,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -46,8 +67,12 @@ impl<'a, T, A: Allocator> Iterator for Iter<'a, T, A> {
             &*(g.element_ptr(idx))
         })
     }
-    fn size_hint(&self) -> (usize, Option<usize>) { (self.remaining, Some(self.remaining)) }
-    fn count(self) -> usize { self.remaining }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+    fn count(self) -> usize {
+        self.remaining
+    }
 }
 
 impl<'a, T, A: Allocator> DoubleEndedIterator for Iter<'a, T, A> {
@@ -64,13 +89,25 @@ impl<'a, T, A: Allocator> ExactSizeIterator for Iter<'a, T, A> {}
 impl<'a, T, A: Allocator> FusedIterator for Iter<'a, T, A> {}
 
 pub struct IterMut<'a, T: 'a, A: Allocator + 'a> {
-    front: Cursor<T, A>, back: Cursor<T, A>, remaining: usize,
+    front: Cursor<T, A>,
+    back: Cursor<T, A>,
+    remaining: usize,
     _marker: PhantomData<&'a mut T>,
 }
 
 impl<'a, T, A: Allocator> IterMut<'a, T, A> {
     pub(crate) unsafe fn new(begin: Cursor<T, A>, end: Cursor<T, A>, len: usize) -> Self {
-        Self { front: begin, back: end, remaining: len, _marker: PhantomData }
+        let back = if len == 0 {
+            end
+        } else {
+            end.advance_backward()
+        };
+        Self {
+            front: begin,
+            back,
+            remaining: len,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -83,8 +120,12 @@ impl<'a, T, A: Allocator> Iterator for IterMut<'a, T, A> {
             &mut *(g.element_ptr_mut(idx))
         })
     }
-    fn size_hint(&self) -> (usize, Option<usize>) { (self.remaining, Some(self.remaining)) }
-    fn count(self) -> usize { self.remaining }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+    fn count(self) -> usize {
+        self.remaining
+    }
 }
 
 impl<'a, T, A: Allocator> DoubleEndedIterator for IterMut<'a, T, A> {
@@ -101,13 +142,35 @@ impl<'a, T, A: Allocator> ExactSizeIterator for IterMut<'a, T, A> {}
 impl<'a, T, A: Allocator> FusedIterator for IterMut<'a, T, A> {}
 
 pub struct IntoIter<T, A: Allocator> {
-    front: Cursor<T, A>, back: Cursor<T, A>, remaining: usize,
+    front: Cursor<T, A>,
+    back: Cursor<T, A>,
+    remaining: usize,
+    head: Option<NonNull<Group<T, A>>>,
+    reserved_groups: Option<NonNull<Group<T, A>>>,
     _marker: PhantomData<T>,
 }
 
 impl<T, A: Allocator> IntoIter<T, A> {
-    pub(crate) unsafe fn new(begin: Cursor<T, A>, end: Cursor<T, A>, len: usize) -> Self {
-        Self { front: begin, back: end, remaining: len, _marker: PhantomData }
+    pub(crate) unsafe fn new(
+        begin: Cursor<T, A>,
+        end: Cursor<T, A>,
+        len: usize,
+        head: Option<NonNull<Group<T, A>>>,
+        reserved_groups: Option<NonNull<Group<T, A>>>,
+    ) -> Self {
+        let back = if len == 0 {
+            end
+        } else {
+            end.advance_backward()
+        };
+        Self {
+            front: begin,
+            back,
+            remaining: len,
+            head,
+            reserved_groups,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -120,8 +183,12 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
             g.element_ptr(idx).read()
         })
     }
-    fn size_hint(&self) -> (usize, Option<usize>) { (self.remaining, Some(self.remaining)) }
-    fn count(self) -> usize { self.remaining }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+    fn count(self) -> usize {
+        self.remaining
+    }
 }
 
 impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
@@ -138,5 +205,25 @@ impl<T, A: Allocator> ExactSizeIterator for IntoIter<T, A> {}
 impl<T, A: Allocator> FusedIterator for IntoIter<T, A> {}
 
 impl<T, A: Allocator> Drop for IntoIter<T, A> {
-    fn drop(&mut self) { for _ in self {} }
+    fn drop(&mut self) {
+        while self.next().is_some() {}
+
+        let mut g = self.head;
+        while let Some(group) = g {
+            unsafe {
+                let next = group.as_ref().next;
+                Group::deallocate_group(group);
+                g = next;
+            }
+        }
+
+        let mut g = self.reserved_groups;
+        while let Some(group) = g {
+            unsafe {
+                let next = group.as_ref().next;
+                Group::deallocate_group(group);
+                g = next;
+            }
+        }
+    }
 }

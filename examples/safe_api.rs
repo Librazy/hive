@@ -36,7 +36,10 @@ fn main() {
     }
     assert_eq!(*first, 0);
     assert_eq!(*second, 1);
-    println!("  After 10000 inserts, first={}, second={}", *first, *second);
+    println!(
+        "  After 10000 inserts, first={}, second={}",
+        *first, *second
+    );
     println!("  len = {}", hive.len());
     println!();
 
@@ -51,7 +54,9 @@ fn main() {
     }
     // Manual erase via raw pointer still works
     let p = hive.insert(99);
-    unsafe { hive.erase(&*p); }
+    unsafe {
+        hive.erase(&*p);
+    }
     println!("  After manual erase with raw ptr, len = {}", hive.len());
     println!();
 

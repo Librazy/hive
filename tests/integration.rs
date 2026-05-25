@@ -54,13 +54,22 @@ fn test_double_ended_iter() {
 }
 
 #[test]
+fn test_next_back_single_element() {
+    let h = Hive::new();
+    h.insert(42);
+    assert_eq!(h.iter().next_back(), Some(&42));
+}
+
+#[test]
 fn test_erase_basic() {
     let mut h = Hive::new();
     let r0 = h.insert(42);
     let _r1 = h.insert(99);
     assert_eq!(h.len(), 2);
 
-    unsafe { h.erase(&*r0); }
+    unsafe {
+        h.erase(&*r0);
+    }
     assert_eq!(h.len(), 1);
 
     let vals: Vec<i32> = h.iter().copied().collect();
@@ -74,7 +83,9 @@ fn test_erase_from_middle() {
     let r2 = h.insert(2);
     h.insert(3);
 
-    unsafe { h.erase(&*r2); }
+    unsafe {
+        h.erase(&*r2);
+    }
 
     let mut sorted: Vec<i32> = h.iter().copied().collect();
     sorted.sort();
@@ -88,7 +99,9 @@ fn test_insert_after_erase() {
     let r2 = h.insert(2);
     h.insert(3);
 
-    unsafe { h.erase(&*r2); }
+    unsafe {
+        h.erase(&*r2);
+    }
     h.insert(4);
 
     assert_eq!(h.len(), 3);
@@ -103,9 +116,25 @@ fn test_erase_all_one_by_one() {
     let refs: Vec<*const i32> = (0..100).map(|i| h.insert(i)).collect();
 
     for r in &refs {
-        unsafe { h.erase(&**r); }
+        unsafe {
+            h.erase(&**r);
+        }
     }
     assert!(h.is_empty());
+}
+
+#[test]
+fn test_insert_after_empty_reuses_reserved_capacity() {
+    let mut h = Hive::new();
+    let ptr = h.insert(1);
+    let cap = h.capacity();
+    unsafe {
+        h.erase(&*ptr);
+    }
+    assert_eq!(h.len(), 0);
+    h.insert(2);
+    assert_eq!(h.capacity(), cap);
+    assert_eq!(h.iter().next(), Some(&2));
 }
 
 #[test]
@@ -221,6 +250,23 @@ fn test_sort() {
 }
 
 #[test]
+fn test_sort_preserves_element_locations() {
+    let mut h = Hive::new();
+    let p1 = h.insert(3) as *mut i32;
+    let p2 = h.insert(1) as *mut i32;
+    let p3 = h.insert(2) as *mut i32;
+    let ptrs = [p1, p2, p3];
+
+    h.sort();
+
+    let live_ptrs: Vec<*const i32> = h.iter().map(|v| v as *const i32).collect();
+    for ptr in ptrs {
+        assert!(live_ptrs.contains(&(ptr as *const i32)));
+    }
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+}
+
+#[test]
 fn test_sort_by_desc() {
     let mut h = Hive::new();
     for i in 0..100 {
@@ -276,6 +322,30 @@ fn test_into_iter() {
 }
 
 #[test]
+fn test_into_iter_drops_remaining_elements() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    struct DropCounter;
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    DROP_COUNT.store(0, Ordering::SeqCst);
+    {
+        let h = Hive::new();
+        for _ in 0..10 {
+            h.insert(DropCounter);
+        }
+        let mut iter = h.into_iter();
+        let _ = iter.next();
+    }
+    assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 10);
+}
+
+#[test]
 fn test_exact_size() {
     let h = Hive::new();
     for i in 0..30 {
@@ -290,9 +360,13 @@ fn test_drop_non_trivial() {
     static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Debug)]
-    struct DropCounter { _val: i32 }
+    struct DropCounter {
+        _val: i32,
+    }
     impl Drop for DropCounter {
-        fn drop(&mut self) { DROP_COUNT.fetch_add(1, Ordering::SeqCst); }
+        fn drop(&mut self) {
+            DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     DROP_COUNT.store(0, Ordering::SeqCst);
@@ -317,7 +391,9 @@ fn test_stress_insert_erase() {
         }
 
         for r in &refs {
-            unsafe { h.erase(&**r); }
+            unsafe {
+                h.erase(&**r);
+            }
         }
         assert!(h.is_empty());
     }
@@ -329,7 +405,9 @@ fn test_alternating_erase() {
     let refs: Vec<*const i32> = (0..500).map(|i| h.insert(i)).collect();
 
     for i in (0..500).step_by(2) {
-        unsafe { h.erase(&*refs[i]); }
+        unsafe {
+            h.erase(&*refs[i]);
+        }
     }
 
     assert_eq!(h.len(), 250);
@@ -346,7 +424,9 @@ fn test_erase_and_reinsert_reuse() {
 
     // Erase every 3rd
     for i in (0..200).step_by(3) {
-        unsafe { h.erase(&*refs[i]); }
+        unsafe {
+            h.erase(&*refs[i]);
+        }
     }
 
     // Re-insert new values (should reuse erased slots)
@@ -364,6 +444,29 @@ fn test_erase_and_reinsert_reuse() {
     for i in 1000..1100 {
         assert!(vals.contains(&i), "missing {i}");
     }
+}
+
+#[test]
+fn test_reinsert_inside_merged_skipblock() {
+    let mut h = Hive::new();
+    let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
+
+    unsafe {
+        h.erase(&*refs[2]);
+    }
+    unsafe {
+        h.erase(&*refs[4]);
+    }
+    unsafe {
+        h.erase(&*refs[3]);
+    }
+
+    h.insert(100);
+    h.insert(101);
+
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, vec![0, 1, 5, 6, 7, 100, 101]);
 }
 
 #[test]
@@ -445,12 +548,30 @@ fn test_trim_capacity() {
 }
 
 #[test]
+fn test_shrink_to_fit_reduces_capacity() {
+    let mut h = Hive::new();
+    h.reserve(500);
+    for i in 0..10 {
+        h.insert(i);
+    }
+    let before = h.capacity();
+    h.shrink_to_fit();
+    assert!(h.capacity() < before);
+    assert_eq!(h.len(), 10);
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, (0..10).collect::<Vec<_>>());
+}
+
+#[test]
 fn test_erase_and_iterate() {
     let mut h = Hive::new();
     let refs: Vec<*const i32> = (0..100).map(|i| h.insert(i)).collect();
 
     for i in (0..100).step_by(3) {
-        unsafe { h.erase(&*refs[i]); }
+        unsafe {
+            h.erase(&*refs[i]);
+        }
     }
 
     // step_by(3) on 0..100: 0,3,6,...,99 → 34 indices erased
@@ -463,7 +584,9 @@ fn test_concurrent_erase_insert() {
     let refs: Vec<*const i32> = (0..500).map(|i| h.insert(i)).collect();
 
     for i in (0..500).step_by(2) {
-        unsafe { h.erase(&*refs[i]); }
+        unsafe {
+            h.erase(&*refs[i]);
+        }
     }
 
     for i in 0..250 {
@@ -563,7 +686,9 @@ fn test_insert_ref_then_erase() {
 
     // Can erase using pointer obtained previously
     let p = hive.insert(99);
-    unsafe { hive.erase(&*p); }
+    unsafe {
+        hive.erase(&*p);
+    }
     assert_eq!(hive.len(), 2);
 }
 
@@ -610,7 +735,9 @@ fn test_insert_ref_erase_multiple() {
 
     // Erase half
     for i in (0..100).step_by(2) {
-        unsafe { hive.erase(&*ptrs[i]); }
+        unsafe {
+            hive.erase(&*ptrs[i]);
+        }
     }
 
     // Re-insert via safe API
