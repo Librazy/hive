@@ -13,4 +13,4 @@ mod skipfield;
 pub mod hive;
 mod iter;
 
-pub use hive::Hive;
+pub use hive::{BlockCapacityLimits, Hive, InvalidBlockCapacityLimits};

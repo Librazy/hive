@@ -3,7 +3,7 @@
 use core::alloc::Allocator;
 use core::cell::Cell;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 
 use alloc::alloc::Global;
@@ -15,6 +15,22 @@ use crate::skipfield::{self, Cursor};
 
 const DEFAULT_MIN_BLOCK_CAPACITY: u16 = 8;
 const DEFAULT_MAX_BLOCK_CAPACITY: u16 = 8192;
+const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockCapacityLimits {
+    pub min: u16,
+    pub max: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidBlockCapacityLimits;
+
+impl BlockCapacityLimits {
+    pub const fn new(min: u16, max: u16) -> Self {
+        Self { min, max }
+    }
+}
 
 pub struct Hive<T, A: Allocator = Global> {
     head: Cell<Option<NonNull<Group<T, A>>>>,
@@ -88,6 +104,17 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             allocator,
         }
     }
+
+    pub fn try_new_in(
+        allocator: A,
+        limits: BlockCapacityLimits,
+    ) -> Result<Self, InvalidBlockCapacityLimits> {
+        Self::check_block_capacity_limits(limits)?;
+        let mut hive = Self::new_in(allocator);
+        hive.min_block_capacity = limits.min;
+        hive.max_block_capacity = limits.max;
+        Ok(hive)
+    }
 }
 
 impl<T> Hive<T, Global> {
@@ -99,6 +126,10 @@ impl<T> Hive<T, Global> {
         let mut hive = Self::new();
         hive.reserve(cap);
         hive
+    }
+
+    pub fn try_new(limits: BlockCapacityLimits) -> Result<Self, InvalidBlockCapacityLimits> {
+        Self::try_new_in(Global, limits)
     }
 }
 
@@ -120,8 +151,86 @@ impl<T, A: Allocator> Hive<T, A> {
     pub fn capacity(&self) -> usize {
         self.capacity.get()
     }
-    pub fn block_capacity_limits(&self) -> (u16, u16) {
-        (self.min_block_capacity, self.max_block_capacity)
+    pub fn max_size(&self) -> usize {
+        usize::MAX / Group::<T, A>::compute_slot_size()
+    }
+    pub fn block_capacity_limits(&self) -> BlockCapacityLimits {
+        BlockCapacityLimits::new(self.min_block_capacity, self.max_block_capacity)
+    }
+
+    pub const fn block_capacity_default_limits() -> BlockCapacityLimits {
+        BlockCapacityLimits::new(DEFAULT_MIN_BLOCK_CAPACITY, DEFAULT_MAX_BLOCK_CAPACITY)
+    }
+
+    pub const fn block_capacity_hard_limits() -> BlockCapacityLimits {
+        BlockCapacityLimits::new(HARD_MIN_BLOCK_CAPACITY, u16::MAX - 1)
+    }
+
+    pub fn get_allocator(&self) -> &A {
+        &self.allocator
+    }
+
+    fn check_block_capacity_limits(
+        limits: BlockCapacityLimits,
+    ) -> Result<(), InvalidBlockCapacityLimits> {
+        let hard = Self::block_capacity_hard_limits();
+        if limits.min < hard.min || limits.min > limits.max || limits.max > hard.max {
+            Err(InvalidBlockCapacityLimits)
+        } else {
+            Ok(())
+        }
+    }
+
+    unsafe fn find_group_for(&self, element: *const u8) -> Option<NonNull<Group<T, A>>> {
+        let mut g = self.head.get();
+        while let Some(group) = g {
+            let gg = group.as_ref();
+            let base = gg.elements_base();
+            let end = base.add(gg.capacity as usize * gg.slot_size);
+            if element >= base && element < end {
+                return Some(group);
+            }
+            g = gg.next;
+        }
+        None
+    }
+
+    unsafe fn cursor_from_ptr(&self, ptr: *const T) -> Option<Cursor<T, A>> {
+        let byte_ptr = ptr as *const u8;
+        let group = self.find_group_for(byte_ptr)?;
+        let g = group.as_ref();
+        let index = g.index_from_element_ptr(byte_ptr);
+
+        if index >= g.capacity {
+            return None;
+        }
+
+        let element = g.element_ptr(index) as *const u8;
+        if element != byte_ptr || *g.skipfield_ptr().add(index as usize) != 0 {
+            return None;
+        }
+
+        Some(make_cursor(
+            group,
+            element,
+            g.skipfield_ptr().add(index as usize),
+        ))
+    }
+
+    unsafe fn count_from_cursor(&self, cursor: Cursor<T, A>) -> usize {
+        let mut cur = cursor;
+        let mut count = 0;
+        let last = self.end.get().advance_backward();
+
+        loop {
+            count += 1;
+            if cur.group == last.group && cur.element == last.element {
+                break;
+            }
+            cur = cur.advance_forward();
+        }
+
+        count
     }
 }
 
@@ -133,6 +242,48 @@ impl<T, A: Allocator> Hive<T, A> {
     }
     pub fn iter_mut(&mut self) -> IterMut<'_, T, A> {
         unsafe { IterMut::new(self.begin.get(), self.end.get(), self.len.get()) }
+    }
+
+    /// Returns a shared reference for a pointer previously returned by this hive.
+    ///
+    /// # Safety
+    /// `ptr` must be either null/foreign/erased, or a valid pointer returned by
+    /// this hive for an element that has not been erased. Passing arbitrary
+    /// pointers may be undefined behavior because pointer provenance and bounds
+    /// cannot be validated completely.
+    pub unsafe fn get(&self, ptr: *const T) -> Option<&T> {
+        let cursor = unsafe { self.cursor_from_ptr(ptr)? };
+        unsafe { Some(&*(cursor.element as *const T)) }
+    }
+
+    /// Returns a mutable reference for a pointer previously returned by this hive.
+    ///
+    /// # Safety
+    /// See [`Hive::get`]. The caller must also ensure there are no aliases to
+    /// the same element for the duration of the returned mutable borrow.
+    pub unsafe fn get_mut(&mut self, ptr: *const T) -> Option<&mut T> {
+        let cursor = unsafe { self.cursor_from_ptr(ptr)? };
+        unsafe { Some(&mut *(cursor.element as *mut T)) }
+    }
+
+    /// Returns an iterator beginning at `ptr`.
+    ///
+    /// # Safety
+    /// See [`Hive::get`].
+    pub unsafe fn iter_from(&self, ptr: *const T) -> Option<Iter<'_, T, A>> {
+        let cursor = unsafe { self.cursor_from_ptr(ptr)? };
+        let remaining = unsafe { self.count_from_cursor(cursor) };
+        unsafe { Some(Iter::new(cursor, self.end.get(), remaining)) }
+    }
+
+    /// Returns a mutable iterator beginning at `ptr`.
+    ///
+    /// # Safety
+    /// See [`Hive::get_mut`].
+    pub unsafe fn iter_mut_from(&mut self, ptr: *const T) -> Option<IterMut<'_, T, A>> {
+        let cursor = unsafe { self.cursor_from_ptr(ptr)? };
+        let remaining = unsafe { self.count_from_cursor(cursor) };
+        unsafe { Some(IterMut::new(cursor, self.end.get(), remaining)) }
     }
 }
 
@@ -260,18 +411,88 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.reserved_groups.set(Some(group));
     }
 
-    unsafe fn find_group_for(&self, element: *const u8) -> Option<NonNull<Group<T, A>>> {
+    fn groups_fit_limits(&self, limits: BlockCapacityLimits) -> bool {
         let mut g = self.head.get();
         while let Some(group) = g {
-            let gg = group.as_ref();
-            let base = gg.elements_base();
-            let end = base.add(gg.capacity as usize * gg.slot_size);
-            if element >= base && element < end {
-                return Some(group);
+            unsafe {
+                let gg = group.as_ref();
+                if gg.capacity < limits.min || gg.capacity > limits.max {
+                    return false;
+                }
+                g = gg.next;
             }
-            g = gg.next;
         }
-        None
+        true
+    }
+
+    fn deallocate_reserved_outside_limits(&self, limits: BlockCapacityLimits) {
+        let mut current = self.reserved_groups.get();
+        let mut previous: Option<NonNull<Group<T, A>>> = None;
+
+        while let Some(group) = current {
+            unsafe {
+                let next = group.as_ref().next;
+                if group.as_ref().capacity < limits.min || group.as_ref().capacity > limits.max {
+                    if let Some(mut prev) = previous {
+                        prev.as_mut().next = next;
+                    } else {
+                        self.reserved_groups.set(next);
+                    }
+                    self.capacity.set(
+                        self.capacity
+                            .get()
+                            .saturating_sub(group.as_ref().capacity as usize),
+                    );
+                    Group::deallocate_group(group);
+                } else {
+                    previous = Some(group);
+                }
+                current = next;
+            }
+        }
+    }
+
+    fn compact_to_limits(&mut self, limits: BlockCapacityLimits) {
+        let mut temp = Self::new_in(self.allocator.clone());
+        temp.min_block_capacity = limits.min;
+        temp.max_block_capacity = limits.max;
+        temp.reserve(self.len.get());
+
+        unsafe {
+            let mut cur = self.begin.get();
+            let count = self.len.get();
+            for i in 0..count {
+                let g = cur.group.unwrap().as_ref();
+                let idx = g.index_from_element_ptr(cur.element);
+                temp.insert_raw(g.element_ptr(idx).read());
+                if i + 1 < count {
+                    cur = cur.advance_forward();
+                }
+            }
+        }
+
+        self.len.set(0);
+        let old = core::mem::replace(self, temp);
+        old.deallocate_without_dropping_elements();
+    }
+
+    fn deallocate_without_dropping_elements(self) {
+        let old = ManuallyDrop::new(self);
+        unsafe {
+            let mut g = old.head.get();
+            while let Some(group) = g {
+                let next = group.as_ref().next;
+                Group::deallocate_group(group);
+                g = next;
+            }
+
+            let mut g = old.reserved_groups.get();
+            while let Some(group) = g {
+                let next = group.as_ref().next;
+                Group::deallocate_group(group);
+                g = next;
+            }
+        }
     }
 }
 
@@ -286,6 +507,31 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Insert an element and return a mutable raw pointer.
     pub fn insert_mut(&self, value: T) -> *mut T {
         self.insert_raw_mut(value)
+    }
+
+    /// Constructs an element in-place in a hive slot.
+    ///
+    /// # Safety
+    /// The closure must initialize the supplied slot exactly once. It must not
+    /// read from the slot before initialization and must not unwind after
+    /// initializing it. If the closure returns without initializing the slot,
+    /// subsequent use of the hive is undefined behavior.
+    pub unsafe fn insert_with_uninit<F>(&self, f: F) -> *const T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
+        self.insert_raw_mut_with(f)
+    }
+
+    /// Constructs an element in-place and returns a mutable raw pointer.
+    ///
+    /// # Safety
+    /// See [`Hive::insert_with_uninit`].
+    pub unsafe fn insert_with_uninit_mut<F>(&self, f: F) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
+        self.insert_raw_mut_with(f)
     }
 
     /// Safe insert — returns a borrowed reference to the new element.
@@ -307,20 +553,34 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     }
 
     fn insert_raw_mut(&self, value: T) -> *mut T {
-        if let Some(eg) = self.erasure_groups_head.get() {
-            unsafe { self.insert_reuse_erased(value, eg) }
-        } else if let Some(tail) = self.tail.get() {
-            if unsafe { !tail.as_ref().is_full() } {
-                unsafe { self.insert_append_tail(value) }
-            } else {
-                unsafe { self.insert_new_group(value) }
-            }
-        } else {
-            unsafe { self.insert_first(value) }
+        unsafe {
+            self.insert_raw_mut_with(|slot| {
+                slot.write(value);
+            })
         }
     }
 
-    unsafe fn insert_first(&self, value: T) -> *mut T {
+    unsafe fn insert_raw_mut_with<F>(&self, f: F) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
+        if let Some(eg) = self.erasure_groups_head.get() {
+            self.insert_reuse_erased_with(f, eg)
+        } else if let Some(tail) = self.tail.get() {
+            if !tail.as_ref().is_full() {
+                self.insert_append_tail_with(f)
+            } else {
+                self.insert_new_group_with(f)
+            }
+        } else {
+            self.insert_first_with(f)
+        }
+    }
+
+    unsafe fn insert_first_with<F>(&self, f: F) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
         let group = if self.reserved_groups.get().is_some() {
             self.reuse_reserved_group(None)
         } else {
@@ -328,7 +588,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         };
         let g = group.as_ref();
         let ptr = g.element_ptr_mut(0);
-        ptr.write(value);
+        f(&mut *(ptr as *mut MaybeUninit<T>));
         g.active_count.set(1);
         self.len.set(1);
         self.begin.set(Self::begin_cursor_of(group));
@@ -336,13 +596,16 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         ptr
     }
 
-    unsafe fn insert_append_tail(&self, value: T) -> *mut T {
+    unsafe fn insert_append_tail_with<F>(&self, f: F) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
         let mut end_cursor = self.end.get();
         let end_group = end_cursor.group.unwrap();
         let g = end_group.as_ref();
         let elem_byte = end_cursor.element as *mut u8;
         let ptr = elem_byte as *mut T;
-        ptr.write(value);
+        f(&mut *(ptr as *mut MaybeUninit<T>));
         end_cursor.element = elem_byte.add(g.slot_size);
         end_cursor.skipfield = end_cursor.skipfield.add(1);
         self.end.set(end_cursor);
@@ -351,7 +614,14 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         ptr
     }
 
-    unsafe fn insert_reuse_erased(&self, value: T, erasure_group: NonNull<Group<T, A>>) -> *mut T {
+    unsafe fn insert_reuse_erased_with<F>(
+        &self,
+        f: F,
+        erasure_group: NonNull<Group<T, A>>,
+    ) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
         let g = erasure_group.as_ref();
         let index = free_list::pop_free_slot::<T, A>(erasure_group);
         let ptr = g.element_ptr_mut(index);
@@ -366,7 +636,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         if g.free_list_head.get() == u16::MAX {
             self.remove_from_erasures_list(erasure_group);
         }
-        ptr.write(value);
+        f(&mut *(ptr as *mut MaybeUninit<T>));
         g.active_count.set(g.active_count.get() + 1);
         self.len.set(self.len.get() + 1);
 
@@ -378,7 +648,10 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         ptr
     }
 
-    unsafe fn insert_new_group(&self, value: T) -> *mut T {
+    unsafe fn insert_new_group_with<F>(&self, f: F) -> *mut T
+    where
+        F: FnOnce(&mut MaybeUninit<T>),
+    {
         let prev = self.tail.get();
         let cap = self.new_group_capacity();
         let group = if self.reserved_groups.get().is_some() {
@@ -388,7 +661,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         };
         let g = group.as_ref();
         let ptr = g.element_ptr_mut(0);
-        ptr.write(value);
+        f(&mut *(ptr as *mut MaybeUninit<T>));
         g.active_count.set(1);
         self.end.set(Self::end_cursor_of(group, 1));
         self.len.set(self.len.get() + 1);
@@ -548,9 +821,9 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
         let mut remaining = needed - self.capacity.get();
         while remaining > 0 {
-            let cap = (remaining as u16)
-                .min(self.max_block_capacity)
-                .max(self.min_block_capacity);
+            let cap = remaining
+                .min(self.max_block_capacity as usize)
+                .max(self.min_block_capacity as usize) as u16;
             let mut group = Group::allocate(cap, None, self.allocator.clone());
             self.capacity.set(self.capacity.get() + cap as usize);
             let g = unsafe { group.as_mut() };
@@ -599,42 +872,27 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             return;
         }
 
-        let mut temp = Self::new_in(self.allocator.clone());
-        temp.min_block_capacity = self.min_block_capacity;
-        temp.max_block_capacity = self.max_block_capacity;
-        temp.reserve(self.len.get());
+        self.compact_to_limits(self.block_capacity_limits());
+    }
 
-        unsafe {
-            let mut cur = self.begin.get();
-            let count = self.len.get();
-            for i in 0..count {
-                let g = cur.group.unwrap().as_ref();
-                let idx = g.index_from_element_ptr(cur.element);
-                temp.insert_raw(g.element_ptr(idx).read());
-                if i + 1 < count {
-                    cur = cur.advance_forward();
-                }
+    pub fn reshape(
+        &mut self,
+        limits: BlockCapacityLimits,
+    ) -> Result<(), InvalidBlockCapacityLimits> {
+        Self::check_block_capacity_limits(limits)?;
+
+        if self.len.get() != 0 && !self.groups_fit_limits(limits) {
+            self.compact_to_limits(limits);
+        } else {
+            self.deallocate_reserved_outside_limits(limits);
+            if self.len.get() == 0 {
+                self.trim_capacity();
             }
+            self.min_block_capacity = limits.min;
+            self.max_block_capacity = limits.max;
         }
 
-        self.len.set(0);
-        let old = core::mem::replace(self, temp);
-        let old = ManuallyDrop::new(old);
-        unsafe {
-            let mut g = old.head.get();
-            while let Some(group) = g {
-                let next = group.as_ref().next;
-                Group::deallocate_group(group);
-                g = next;
-            }
-
-            let mut g = old.reserved_groups.get();
-            while let Some(group) = g {
-                let next = group.as_ref().next;
-                Group::deallocate_group(group);
-                g = next;
-            }
-        }
+        Ok(())
     }
 
     pub fn trim_capacity(&mut self) {
@@ -650,6 +908,157 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                 self.reserved_groups.set(next);
             }
         }
+    }
+
+    pub fn trim_capacity_to(&mut self, retain_capacity: usize) {
+        if self.capacity.get() <= retain_capacity || self.len.get() >= retain_capacity {
+            return;
+        }
+
+        let mut current = self.reserved_groups.get();
+        let mut previous: Option<NonNull<Group<T, A>>> = None;
+
+        while let Some(group) = current {
+            if self.capacity.get() <= retain_capacity {
+                break;
+            }
+
+            unsafe {
+                let next = group.as_ref().next;
+                let group_capacity = group.as_ref().capacity as usize;
+                if self.capacity.get().saturating_sub(group_capacity) >= retain_capacity {
+                    if let Some(mut prev) = previous {
+                        prev.as_mut().next = next;
+                    } else {
+                        self.reserved_groups.set(next);
+                    }
+                    self.capacity.set(self.capacity.get() - group_capacity);
+                    Group::deallocate_group(group);
+                } else {
+                    previous = Some(group);
+                }
+                current = next;
+            }
+        }
+    }
+}
+
+impl<T: Clone, A: Allocator + Clone> Hive<T, A> {
+    pub fn assign(&mut self, len: usize, value: T) {
+        self.clear();
+        self.reserve(len);
+        for _ in 0..len {
+            self.insert_raw(value.clone());
+        }
+    }
+}
+
+impl<T, A: Allocator + Clone> Hive<T, A> {
+    pub fn assign_from_iter<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.clear();
+        self.extend(iter);
+    }
+
+    pub fn insert_many<I: IntoIterator<Item = T>>(&self, iter: I) {
+        for item in iter {
+            self.insert_raw(item);
+        }
+    }
+
+    pub fn splice(&mut self, source: &mut Self) {
+        if core::ptr::eq(self, source) || source.is_empty() {
+            return;
+        }
+
+        let mut values = alloc::vec::Vec::with_capacity(source.len());
+        unsafe {
+            let mut cur = source.begin.get();
+            let count = source.len.get();
+            for i in 0..count {
+                let g = cur.group.unwrap().as_ref();
+                let idx = g.index_from_element_ptr(cur.element);
+                values.push(g.element_ptr(idx).read());
+                if i + 1 < count {
+                    cur = cur.advance_forward();
+                }
+            }
+        }
+        source.len.set(0);
+        source.clear_without_dropping_elements();
+        self.extend(values);
+    }
+
+    fn clear_without_dropping_elements(&mut self) {
+        let mut g = self.head.get();
+        while let Some(mut group) = g {
+            unsafe {
+                let next = group.as_ref().next;
+                let gm = group.as_mut();
+                gm.active_count.set(0);
+                gm.free_list_head.set(u16::MAX);
+                gm.erasures_next = None;
+                gm.erasures_prev = None;
+                gm.next = self.reserved_groups.get();
+                gm.prev = None;
+                core::ptr::write_bytes(gm.skipfield_mut(), 0, gm.capacity as usize);
+                self.reserved_groups.set(Some(group));
+                g = next;
+            }
+        }
+        self.head.set(None);
+        self.tail.set(None);
+        self.begin.set(null_cursor());
+        self.end.set(null_cursor());
+        self.erasure_groups_head.set(None);
+    }
+}
+
+impl<T: PartialEq, A: Allocator + Clone> Hive<T, A> {
+    pub fn unique(&mut self) -> usize {
+        self.unique_by(|a, b| a == b)
+    }
+}
+
+impl<T, A: Allocator + Clone> Hive<T, A> {
+    pub fn unique_by<F>(&mut self, mut same_bucket: F) -> usize
+    where
+        F: FnMut(&T, &T) -> bool,
+    {
+        if self.len.get() < 2 {
+            return 0;
+        }
+
+        let mut to_erase: alloc::vec::Vec<*mut T> = alloc::vec::Vec::new();
+        unsafe {
+            let mut prev = self.begin.get();
+            let mut cur = prev.advance_forward();
+            let original_len = self.len.get();
+            for i in 1..original_len {
+                let pg = prev.group.unwrap().as_ref();
+                let pidx = pg.index_from_element_ptr(prev.element);
+                let cg = cur.group.unwrap().as_ref();
+                let cidx = cg.index_from_element_ptr(cur.element);
+                let current_ptr = cg.element_ptr_mut(cidx);
+
+                if same_bucket(&*pg.element_ptr(pidx), &*current_ptr) {
+                    to_erase.push(current_ptr);
+                } else {
+                    prev = cur;
+                }
+
+                if i + 1 < original_len {
+                    cur = cur.advance_forward();
+                }
+            }
+        }
+
+        let removed = to_erase.len();
+        for ptr in to_erase {
+            unsafe {
+                self.erase_raw(ptr);
+            }
+        }
+        removed
     }
 }
 
