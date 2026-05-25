@@ -259,7 +259,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         
         // Check if this slot is before the current begin cursor (for begin update)
         let new_elem_byte = g.elements_base().add(index as usize * g.slot_size);
-        let update_begin = self.begin.group.map_or(false, |bg| {
+        let update_begin = self.begin.group.is_some_and(|bg| {
             erasure_group == bg && (new_elem_byte as *const u8) < self.begin.element
         });
         let new_sf = g.skipfield_ptr().add(index as usize);
@@ -300,10 +300,20 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 // ── Erase ──
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
+    /// Erase an element by its pointer.
+    ///
+    /// # Safety
+    /// `element_ref` must be a valid pointer to an element in this hive that
+    /// has not already been erased.
     pub unsafe fn erase(&mut self, element_ref: &T) {
         self.erase_raw(element_ref as *const T as *mut T);
     }
 
+    /// Erase an element by its mutable pointer.
+    ///
+    /// # Safety
+    /// `element_ref` must be a valid mutable pointer to an element in this hive
+    /// that has not already been erased.
     pub unsafe fn erase_mut(&mut self, element_ref: &mut T) {
         self.erase_raw(element_ref as *mut T);
     }

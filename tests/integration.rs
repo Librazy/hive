@@ -416,7 +416,7 @@ fn test_last() {
     h.insert(1);
     h.insert(2);
     h.insert(3);
-    assert_eq!(h.iter().last(), Some(&3));
+    assert_eq!(h.iter().next_back(), Some(&3));
 }
 
 #[test]
