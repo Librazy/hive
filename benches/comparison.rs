@@ -13,7 +13,7 @@ const N: usize = 100_000;
 #[bench]
 fn bench_hive_append(b: &mut Bencher) {
     b.iter(|| {
-        let mut h = Hive::with_capacity(N);
+        let h = Hive::with_capacity(N);
         for i in 0..N {
             h.insert(i);
         }
@@ -58,7 +58,7 @@ fn bench_vecdeque_push_back(b: &mut Bencher) {
 
 #[bench]
 fn bench_hive_iter_sum(b: &mut Bencher) {
-    let mut h = Hive::with_capacity(N);
+    let h = Hive::with_capacity(N);
     for i in 0..N {
         h.insert(i);
     }
@@ -177,7 +177,7 @@ fn bench_vec_mixed(b: &mut Bencher) {
 
 #[bench]
 fn bench_hive_random_access(b: &mut Bencher) {
-    let mut h = Hive::with_capacity(N);
+    let h = Hive::with_capacity(N);
     let ptrs: Vec<*const u64> = (0..N as u64).map(|i| h.insert(i)).collect();
     b.iter(|| {
         let mut sum: u64 = 0;

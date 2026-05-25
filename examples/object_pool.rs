@@ -37,7 +37,8 @@ struct HivePool { pool: Hive<Particle> }
 
 impl HivePool {
     fn new(cap: usize) -> Self { Self { pool: Hive::with_capacity(cap) } }
-    fn spawn(&mut self, x: f64, y: f64, vx: f64, vy: f64) -> *const Particle {
+    /// Spawn using safe API — returns `&Particle`
+    fn spawn(&self, x: f64, y: f64, vx: f64, vy: f64) -> *const Particle {
         self.pool.insert(Particle::spawn(x, y, vx, vy))
     }
     unsafe fn despawn(&mut self, p: *const Particle) { self.pool.erase(&*p); }
@@ -127,7 +128,7 @@ fn main() {
 
     // 1. Pure append throughput
     let start = Instant::now();
-    let mut h = HivePool::new(N);
+    let h = HivePool::new(N);
     for i in 0..N { h.spawn(i as f64, 0.0, 0.0, 0.0); }
     println!("Insert {N}: Hive {:>8.2?}", start.elapsed());
 
@@ -156,7 +157,7 @@ fn main() {
     println!("Erase/insert {N}: Vec  {:>8.2?}", start.elapsed());
 
     // 3. Iteration throughput
-    let mut h = HivePool::new(N);
+    let h = HivePool::new(N);
     for i in 0..N { h.spawn(i as f64, 0.0, 0.0, 0.0); }
     let start = Instant::now();
     let sum: f64 = h.pool.iter().map(|p| p.x).sum();

@@ -18,7 +18,7 @@ fn main() {
 fn stable_references() {
     println!("--- Stable References ---");
 
-    let mut hive: Hive<&str> = Hive::new();
+    let hive: Hive<&str> = Hive::new();
     let hello = hive.insert("hello");
     let world = hive.insert("world");
     let rust = hive.insert("rust");
@@ -66,7 +66,7 @@ fn insert_and_erase() {
 fn bulk_insertion() {
     println!("--- Bulk Insertion ---");
 
-    let mut hive = Hive::with_capacity(100_000);
+    let hive = Hive::with_capacity(100_000);
     for i in 0..100_000 {
         hive.insert(i);
     }
@@ -98,7 +98,7 @@ fn retain_and_sort() {
 fn iteration() {
     println!("--- Bidirectional Iteration ---");
 
-    let mut hive = Hive::new();
+    let hive = Hive::new();
     for c in 'a'..='j' {
         hive.insert(c);
     }
