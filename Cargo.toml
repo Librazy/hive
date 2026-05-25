@@ -1,0 +1,12 @@
+[package]
+name = "hive"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust port of plf::hive — a bucket-based, unordered container with stable references, O(1) insertion/erasure, and memory reuse"
+license = "Zlib"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
