@@ -1,4 +1,4 @@
-use hive::Hive;
+use hive::{BlockCapacityLimits, Hive};
 
 #[test]
 fn test_new_empty() {
@@ -13,6 +13,36 @@ fn test_insert_one() {
     h.insert(42);
     assert!(!h.is_empty());
     assert_eq!(h.len(), 1);
+}
+
+#[test]
+fn test_insert_with_uninit() {
+    let h = Hive::new();
+    let ptr = unsafe {
+        h.insert_with_uninit(|slot| {
+            slot.write(String::from("hello"));
+        })
+    };
+
+    assert_eq!(h.len(), 1);
+    unsafe {
+        assert_eq!(&*ptr, "hello");
+    }
+}
+
+#[test]
+fn test_insert_with_uninit_mut() {
+    let h = Hive::new();
+    let ptr = unsafe {
+        h.insert_with_uninit_mut(|slot| {
+            slot.write(41);
+        })
+    };
+
+    unsafe {
+        *ptr += 1;
+    }
+    assert_eq!(h.iter().next(), Some(&42));
 }
 
 #[test]
@@ -111,6 +141,28 @@ fn test_insert_after_erase() {
 }
 
 #[test]
+fn test_insert_with_uninit_reuses_erased_slot() {
+    let mut h = Hive::new();
+    h.insert(1);
+    let erased = h.insert(2);
+    h.insert(3);
+    unsafe {
+        h.erase(&*erased);
+    }
+
+    let inserted = unsafe {
+        h.insert_with_uninit(|slot| {
+            slot.write(4);
+        })
+    };
+
+    assert_eq!(inserted, erased);
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, vec![1, 3, 4]);
+}
+
+#[test]
 fn test_erase_all_one_by_one() {
     let mut h = Hive::new();
     let refs: Vec<*const i32> = (0..100).map(|i| h.insert(i)).collect();
@@ -168,6 +220,62 @@ fn test_with_capacity() {
         h.insert(i);
     }
     assert_eq!(h.len(), 200);
+}
+
+#[test]
+fn test_block_capacity_limit_apis() {
+    assert_eq!(
+        Hive::<i32>::block_capacity_default_limits(),
+        BlockCapacityLimits::new(8, 8192)
+    );
+    assert_eq!(Hive::<i32>::block_capacity_hard_limits().min, 3);
+
+    let h = Hive::<i32>::try_new(BlockCapacityLimits::new(4, 16)).unwrap();
+    assert_eq!(h.block_capacity_limits(), BlockCapacityLimits::new(4, 16));
+
+    assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(2, 16)).is_err());
+    assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(16, 4)).is_err());
+}
+
+#[test]
+fn test_max_size_and_allocator_access() {
+    let h: Hive<i32> = Hive::new();
+    assert!(h.max_size() > 0);
+    let _ = h.get_allocator();
+}
+
+#[test]
+fn test_reshape_updates_limits_and_preserves_values() {
+    let mut h = Hive::<i32>::try_new(BlockCapacityLimits::new(4, 16)).unwrap();
+    for i in 0..40 {
+        h.insert(i);
+    }
+
+    h.reshape(BlockCapacityLimits::new(8, 32)).unwrap();
+    assert_eq!(h.block_capacity_limits(), BlockCapacityLimits::new(8, 32));
+    assert_eq!(h.len(), 40);
+
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, (0..40).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_reshape_rejects_invalid_limits() {
+    let mut h = Hive::<i32>::new();
+    assert!(h.reshape(BlockCapacityLimits::new(1, 8)).is_err());
+    assert_eq!(
+        h.block_capacity_limits(),
+        Hive::<i32>::block_capacity_default_limits()
+    );
+}
+
+#[test]
+fn test_large_reserve_uses_max_capacity_blocks() {
+    let mut h: Hive<i32> = Hive::new();
+    h.reserve(70_000);
+    assert!(h.capacity() >= 70_000);
+    assert!(h.capacity() < 80_000);
 }
 
 #[test]
@@ -545,6 +653,101 @@ fn test_trim_capacity() {
     let cap_before = h.capacity();
     h.trim_capacity();
     assert!(h.capacity() <= cap_before);
+}
+
+#[test]
+fn test_trim_capacity_to() {
+    let mut h: Hive<i32> = Hive::new();
+    h.reserve(500);
+    let cap_before = h.capacity();
+    h.trim_capacity_to(100);
+    assert!(h.capacity() <= cap_before);
+    assert!(h.capacity() >= 100 || h.capacity() == 0);
+}
+
+#[test]
+fn test_get_and_iter_from_pointer() {
+    let mut h = Hive::new();
+    let p1 = h.insert(1);
+    let p2 = h.insert(2);
+    h.insert(3);
+
+    assert_eq!(unsafe { h.get(p2) }, Some(&2));
+    assert_eq!(
+        unsafe { h.iter_from(p2) }
+            .unwrap()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+
+    unsafe {
+        h.erase(&*p1);
+    }
+    assert_eq!(unsafe { h.get(p1) }, None);
+}
+
+#[test]
+fn test_get_mut_and_iter_mut_from_pointer() {
+    let mut h = Hive::new();
+    h.insert(1);
+    let p2 = h.insert(2);
+    h.insert(3);
+
+    *unsafe { h.get_mut(p2) }.unwrap() = 20;
+    for value in unsafe { h.iter_mut_from(p2) }.unwrap() {
+        *value += 1;
+    }
+
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 21, 4]);
+}
+
+#[test]
+fn test_assign_and_assign_from_iter() {
+    let mut h = Hive::new();
+    h.extend(0..10);
+    h.assign(3, 7);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![7, 7, 7]);
+
+    h.assign_from_iter([1, 2, 3, 4]);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_insert_many() {
+    let h = Hive::new();
+    h.insert(1);
+    h.insert_many([2, 3, 4]);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_unique() {
+    let mut h = Hive::new();
+    h.extend([1, 1, 2, 2, 2, 3, 1, 1]);
+    assert_eq!(h.unique(), 4);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 1]);
+}
+
+#[test]
+fn test_unique_by() {
+    let mut h = Hive::new();
+    h.extend([1, 3, 4, 6, 7]);
+    assert_eq!(h.unique_by(|a, b| a % 2 == b % 2), 2);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 4, 7]);
+}
+
+#[test]
+fn test_splice_moves_source_elements() {
+    let mut a = Hive::new();
+    a.extend([1, 2]);
+    let mut b = Hive::new();
+    b.extend([3, 4]);
+
+    a.splice(&mut b);
+
+    assert!(b.is_empty());
+    assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
 }
 
 #[test]
