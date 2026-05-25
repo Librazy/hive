@@ -1,9 +1,9 @@
 //! Jump-counting skipfield pattern and cursor types.
 
+use crate::group::Group;
 use core::alloc::Allocator;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use crate::group::Group;
 
 pub(crate) struct Cursor<T, A: Allocator> {
     pub group: Option<NonNull<Group<T, A>>>,
@@ -23,10 +23,17 @@ impl<T, A: Allocator> Copy for Cursor<T, A> {}
 impl<T, A: Allocator> Cursor<T, A> {
     #[allow(dead_code)]
     pub fn null() -> Self {
-        Self { group: None, element: core::ptr::null(), skipfield: core::ptr::null(), _marker: PhantomData }
+        Self {
+            group: None,
+            element: core::ptr::null(),
+            skipfield: core::ptr::null(),
+            _marker: PhantomData,
+        }
     }
     #[allow(dead_code)]
-    pub fn is_null(&self) -> bool { self.group.is_none() }
+    pub fn is_null(&self) -> bool {
+        self.group.is_none()
+    }
 
     pub unsafe fn advance_forward(&self) -> Cursor<T, A> {
         let g = self.group.expect("null cursor").as_ref();
@@ -38,7 +45,11 @@ impl<T, A: Allocator> Cursor<T, A> {
 
         if sf_idx + 1 < cap {
             let nv = *self.skipfield.add(1);
-            let ni = if nv == 0 { sf_idx + 1 } else { sf_idx + 1 + nv as usize };
+            let ni = if nv == 0 {
+                sf_idx + 1
+            } else {
+                sf_idx + 1 + nv as usize
+            };
             if ni < cap {
                 Cursor {
                     group: self.group,
@@ -54,7 +65,10 @@ impl<T, A: Allocator> Cursor<T, A> {
                 let (elem, sf_ptr) = if sf0 == 0 {
                     (ng.elements_base(), ng.skipfield_ptr())
                 } else {
-                    (ng.elements_base().add(sf0 as usize * ng.slot_size), ng.skipfield_ptr().add(sf0 as usize))
+                    (
+                        ng.elements_base().add(sf0 as usize * ng.slot_size),
+                        ng.skipfield_ptr().add(sf0 as usize),
+                    )
                 };
                 Cursor {
                     group: Some(next),
@@ -109,10 +123,19 @@ impl<T, A: Allocator> Cursor<T, A> {
             let pg = prev.as_ref();
             // Find last active element in the previous group
             let (sf_ptr, idx) = find_last_active(pg);
-            (Some(prev), pg.elements_base().add(idx * pg.slot_size), sf_ptr)
+            (
+                Some(prev),
+                pg.elements_base().add(idx * pg.slot_size),
+                sf_ptr,
+            )
         };
 
-        Cursor { group, element: elem, skipfield: sf, _marker: PhantomData }
+        Cursor {
+            group,
+            element: elem,
+            skipfield: sf,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -130,7 +153,10 @@ unsafe fn find_last_active<T, A: Allocator>(g: &Group<T, A>) -> (*const u16, usi
             if idx + 1 < cap && *sf.add(idx + 1) != 0 {
                 let run_len = *sf.add(idx + 1);
                 let run_start = (idx + 1).saturating_sub(run_len as usize);
-                if idx > run_start { idx = run_start; continue; }
+                if idx > run_start {
+                    idx = run_start;
+                    continue;
+                }
             }
             return (sf.add(idx), idx);
         }
@@ -169,75 +195,37 @@ pub(crate) unsafe fn mark_erased<T, A: Allocator>(group: NonNull<Group<T, A>>, i
 pub(crate) unsafe fn mark_constructed<T, A: Allocator>(group: NonNull<Group<T, A>>, index: u16) {
     let g = group.as_ref();
     let sf = g.skipfield_mut();
-    let skip_val = *sf.add(index as usize);
-    debug_assert_ne!(skip_val, 0, "mark_constructed on non-erased slot");
+    let capacity = g.capacity as usize;
+    let idx = index as usize;
+    debug_assert_ne!(*sf.add(idx), 0, "mark_constructed on non-erased slot");
 
-    if skip_val == 1 {
-        *sf.add(index as usize) = 0;
+    let mut start = idx;
+    while start > 0 && *sf.add(start - 1) != 0 {
+        start -= 1;
+    }
+
+    let mut end = idx;
+    while end + 1 < capacity && *sf.add(end + 1) != 0 {
+        end += 1;
+    }
+
+    for i in start..=end {
+        *sf.add(i) = 0;
+    }
+
+    rebuild_run(sf, start, idx);
+    rebuild_run(sf, idx + 1, end + 1);
+}
+
+unsafe fn rebuild_run(sf: *mut u16, start: usize, end: usize) {
+    if start >= end {
         return;
     }
 
-    let capacity = g.capacity as usize;
-    let idx = index as usize;
-    let n = skip_val as usize;
-
-    // Check if this slot is the START of the run (has matching end boundary at idx+n-1)
-    let is_start = n > 1
-        && idx + n <= capacity + 1  // idx+n-1 < capacity
-        && idx + n >= 1             // idx+n-1 >= 0
-        && idx + n - 1 < capacity
-        && *sf.add(idx + n - 1) == skip_val;
-
-    // Check if this slot is the END of the run (has matching start boundary at idx+1-n)
-    let is_end = n > 1
-        && idx + 1 >= n  // idx - n + 1 >= 0
-        && *sf.add(idx + 1 - n) == skip_val;
-
-    if is_start && !is_end {
-        // Remove from start: shrink run rightward
-        *sf.add(idx) = 0;
-        let new_val = skip_val - 1;
-        if new_val > 0 {
-            let end_idx = idx + n - 1;
-            *sf.add(end_idx) = new_val;
-            if n > 2 {
-                *sf.add(idx + 1) = new_val;
-            }
-        }
-    } else if is_end && !is_start {
-        // Remove from end: shrink run leftward
-        *sf.add(idx) = 0;
-        let new_val = skip_val - 1;
-        if new_val > 0 {
-            let start_idx = idx - n + 1;
-            *sf.add(start_idx) = new_val;
-            if n > 2 {
-                *sf.add(idx - 1) = new_val;
-            }
-        }
-    } else if is_start && is_end {
-        // n == 2 run, both slots are boundaries — became a single slot, but skip_val != 1
-        // shouldn't reach here normally, but handle gracefully
-        *sf.add(idx) = 0;
-    } else {
-        // Interior — remove from middle, merge remaining left+right runs
-        let mut left_idx = idx - 1;
-        while left_idx > 0 && *sf.add(left_idx) == 0 {
-            left_idx -= 1;
-        }
-        let left_start_val = *sf.add(left_idx);
-        let mut right_idx = idx + 1;
-        while right_idx < capacity && *sf.add(right_idx) == 0 {
-            right_idx += 1;
-        }
-        let right_end_val = *sf.add(right_idx);
-
-        *sf.add(idx) = 0;
-        let merged_len = left_start_val + right_end_val;
-        let left_start = left_idx - left_start_val as usize + 1;
-        let right_end = right_idx;
-
-        *sf.add(left_start) = merged_len;
-        *sf.add(right_end) = merged_len;
+    let len = (end - start) as u16;
+    for i in start..end {
+        *sf.add(i) = 1;
     }
+    *sf.add(start) = len;
+    *sf.add(end - 1) = len;
 }

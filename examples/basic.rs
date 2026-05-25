@@ -23,7 +23,10 @@ fn stable_references() {
     let world = hive.insert("world");
     let rust = hive.insert("rust");
 
-    println!("Inserted: hello at {:p}, world at {:p}, rust at {:p}", hello, world, rust);
+    println!(
+        "Inserted: hello at {:p}, world at {:p}, rust at {:p}",
+        hello, world, rust
+    );
 
     // Insert many more elements, pointers to originals remain valid
     for _i in 0..10_000 {
@@ -31,8 +34,14 @@ fn stable_references() {
     }
 
     unsafe {
-        println!("After 10000 inserts, hello still at {:p}: {}", hello, *hello);
-        println!("After 10000 inserts, world still at {:p}: {}", world, *world);
+        println!(
+            "After 10000 inserts, hello still at {:p}: {}",
+            hello, *hello
+        );
+        println!(
+            "After 10000 inserts, world still at {:p}: {}",
+            world, *world
+        );
         println!("After 10000 inserts, rust  still at {:p}: {}", rust, *rust);
     }
     println!();
@@ -51,7 +60,9 @@ fn insert_and_erase() {
     assert_eq!(hive.len(), 3);
 
     // Erase the middle element
-    unsafe { hive.erase(&*p2); }
+    unsafe {
+        hive.erase(&*p2);
+    }
     println!("After erasing 2: {:?}", hive);
     assert_eq!(hive.len(), 2);
 
@@ -70,7 +81,11 @@ fn bulk_insertion() {
     for i in 0..100_000 {
         hive.insert(i);
     }
-    println!("Inserted {} elements, capacity: {}", hive.len(), hive.capacity());
+    println!(
+        "Inserted {} elements, capacity: {}",
+        hive.len(),
+        hive.capacity()
+    );
 
     let sum: u64 = hive.iter().map(|&x| x as u64).sum();
     println!("Sum of all elements: {sum}");

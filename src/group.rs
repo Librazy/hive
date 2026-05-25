@@ -2,8 +2,8 @@
 
 use core::alloc::{Allocator, Layout};
 use core::cell::Cell;
-use core::mem::{align_of, size_of};
 use core::marker::PhantomData;
+use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
 pub(crate) struct Group<T, A: Allocator> {
@@ -25,8 +25,12 @@ pub(crate) struct Group<T, A: Allocator> {
 impl<T, A: Allocator> Group<T, A> {
     pub(crate) fn compute_slot_size() -> usize {
         let min_size = core::cmp::max(size_of::<T>(), 2 * size_of::<u16>());
-        let align = align_of::<T>();
+        let align = Self::allocation_align();
         min_size.div_ceil(align) * align
+    }
+
+    pub(crate) fn allocation_align() -> usize {
+        core::cmp::max(align_of::<T>(), align_of::<u16>())
     }
 
     pub(crate) fn compute_allocation_size(capacity: u16, slot_size: usize) -> usize {
@@ -38,27 +42,31 @@ impl<T, A: Allocator> Group<T, A> {
         prev: Option<NonNull<Group<T, A>>>,
         allocator: A,
     ) -> NonNull<Group<T, A>>
-    where A: Clone
+    where
+        A: Clone,
     {
         let slot_size = Self::compute_slot_size();
         let alloc_size = Self::compute_allocation_size(capacity, slot_size);
 
         let group_layout = Layout::new::<Group<T, A>>();
-        let group_ptr = allocator.allocate(group_layout)
+        let group_ptr = allocator
+            .allocate(group_layout)
             .expect("hive: group allocation failed")
             .cast::<Group<T, A>>();
 
-        let elem_layout = Layout::from_size_align(alloc_size, align_of::<T>())
+        let elem_layout = Layout::from_size_align(alloc_size, Self::allocation_align())
             .expect("hive: invalid element layout");
-        let alloc_block = allocator.allocate(elem_layout)
+        let alloc_block = allocator
+            .allocate(elem_layout)
             .expect("hive: element block allocation failed");
 
         let allocation: NonNull<u8> = alloc_block.cast::<u8>();
 
-        let skipfield_base = unsafe {
-            allocation.as_ptr().add(slot_size * capacity as usize) as *mut u16
-        };
-        unsafe { core::ptr::write_bytes(skipfield_base, 0, capacity as usize + 1); }
+        let skipfield_base =
+            unsafe { allocation.as_ptr().add(slot_size * capacity as usize) as *mut u16 };
+        unsafe {
+            core::ptr::write_bytes(skipfield_base, 0, capacity as usize + 1);
+        }
 
         let group_number = prev.map_or(0, |p| unsafe { p.as_ref().group_number + 1 });
 
@@ -85,9 +93,10 @@ impl<T, A: Allocator> Group<T, A> {
     }
 
     pub(crate) unsafe fn deallocate_data(&self) {
-        let elem_layout = Layout::from_size_align(self.allocation_size, align_of::<T>())
+        let elem_layout = Layout::from_size_align(self.allocation_size, Self::allocation_align())
             .expect("hive: invalid element layout");
-        self.allocator.deallocate(self.allocation.cast::<u8>(), elem_layout);
+        self.allocator
+            .deallocate(self.allocation.cast::<u8>(), elem_layout);
     }
 
     pub(crate) unsafe fn deallocate_group(this: NonNull<Group<T, A>>) {
@@ -130,11 +139,15 @@ impl<T, A: Allocator> Group<T, A> {
     }
 
     pub(crate) unsafe fn skipfield_mut(&self) -> *mut u16 {
-        self.allocation.as_ptr().add(self.slot_size * self.capacity as usize) as *mut u16
+        self.allocation
+            .as_ptr()
+            .add(self.slot_size * self.capacity as usize) as *mut u16
     }
 
     pub(crate) unsafe fn skipfield_ptr(&self) -> *const u16 {
-        self.allocation.as_ptr().add(self.slot_size * self.capacity as usize) as *const u16
+        self.allocation
+            .as_ptr()
+            .add(self.slot_size * self.capacity as usize) as *const u16
     }
 
     pub(crate) fn is_full(&self) -> bool {

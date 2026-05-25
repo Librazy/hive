@@ -16,12 +16,22 @@ use std::time::Instant;
 
 #[derive(Debug)]
 struct Particle {
-    x: f64, y: f64, vx: f64, vy: f64, life: f64,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
 }
 
 impl Particle {
     fn spawn(x: f64, y: f64, vx: f64, vy: f64) -> Self {
-        Self { x, y, vx, vy, life: 1.0 }
+        Self {
+            x,
+            y,
+            vx,
+            vy,
+            life: 1.0,
+        }
     }
     fn update(&mut self, dt: f64) -> bool {
         self.x += self.vx * dt;
@@ -33,17 +43,27 @@ impl Particle {
 
 // ── Hive-based pool ──
 
-struct HivePool { pool: Hive<Particle> }
+struct HivePool {
+    pool: Hive<Particle>,
+}
 
 impl HivePool {
-    fn new(cap: usize) -> Self { Self { pool: Hive::with_capacity(cap) } }
+    fn new(cap: usize) -> Self {
+        Self {
+            pool: Hive::with_capacity(cap),
+        }
+    }
     /// Spawn using safe API — returns `&Particle`
     fn spawn(&self, x: f64, y: f64, vx: f64, vy: f64) -> *const Particle {
         self.pool.insert(Particle::spawn(x, y, vx, vy))
     }
-    unsafe fn despawn(&mut self, p: *const Particle) { self.pool.erase(&*p); }
+    unsafe fn despawn(&mut self, p: *const Particle) {
+        self.pool.erase(&*p);
+    }
     #[allow(dead_code)]
-    fn active(&self) -> usize { self.pool.len() }
+    fn active(&self) -> usize {
+        self.pool.len()
+    }
 }
 
 // ── Vec<Option<Particle>> pool (typical alternative) ──
@@ -55,7 +75,10 @@ struct VecPool {
 
 impl VecPool {
     fn new(cap: usize) -> Self {
-        Self { particles: Vec::with_capacity(cap), free_list: Vec::with_capacity(cap) }
+        Self {
+            particles: Vec::with_capacity(cap),
+            free_list: Vec::with_capacity(cap),
+        }
     }
     fn spawn(&mut self, x: f64, y: f64, vx: f64, vy: f64) -> usize {
         let p = Particle::spawn(x, y, vx, vy);
@@ -82,10 +105,16 @@ impl VecPool {
 fn simulate_hive(pool: &mut HivePool, dt: f64) -> usize {
     let mut dead = Vec::new();
     for p in pool.pool.iter_mut() {
-        if p.update(dt) { dead.push(p as *const Particle); }
+        if p.update(dt) {
+            dead.push(p as *const Particle);
+        }
     }
     let n = dead.len();
-    for ptr in dead { unsafe { pool.despawn(ptr); } }
+    for ptr in dead {
+        unsafe {
+            pool.despawn(ptr);
+        }
+    }
     n
 }
 
@@ -94,11 +123,15 @@ fn simulate_vec(pool: &mut VecPool, dt: f64) -> usize {
     let mut dead = Vec::new();
     for (i, p) in pool.particles.iter_mut().enumerate() {
         if let Some(particle) = p {
-            if particle.update(dt) { dead.push(i); }
+            if particle.update(dt) {
+                dead.push(i);
+            }
         }
     }
     let n = dead.len();
-    for i in dead { pool.despawn(i); }
+    for i in dead {
+        pool.despawn(i);
+    }
     n
 }
 
@@ -111,7 +144,11 @@ fn main() {
         let x = (i % 20) as f64 * 10.0;
         pool.spawn(x, (i / 20) as f64 * 10.0, 0.0, -50.0);
     }
-    println!("Spawned {} particles (cap: {})", pool.active(), pool.pool.capacity());
+    println!(
+        "Spawned {} particles (cap: {})",
+        pool.active(),
+        pool.pool.capacity()
+    );
 
     let mut total_despawned = 0;
     for _frame in 0..60 {
@@ -121,7 +158,10 @@ fn main() {
             pool.spawn(i as f64, 200.0, 0.0, -100.0);
         }
     }
-    println!("Despawned {total_despawned} over 60 frames, {} still active\n", pool.active());
+    println!(
+        "Despawned {total_despawned} over 60 frames, {} still active\n",
+        pool.active()
+    );
 
     // ── Benchmarks ──
     const N: usize = 10_000;
@@ -129,12 +169,16 @@ fn main() {
     // 1. Pure append throughput
     let start = Instant::now();
     let h = HivePool::new(N);
-    for i in 0..N { h.spawn(i as f64, 0.0, 0.0, 0.0); }
+    for i in 0..N {
+        h.spawn(i as f64, 0.0, 0.0, 0.0);
+    }
     println!("Insert {N}: Hive {:>8.2?}", start.elapsed());
 
     let start = Instant::now();
     let mut v = VecPool::new(N);
-    for i in 0..N { v.spawn(i as f64, 0.0, 0.0, 0.0); }
+    for i in 0..N {
+        v.spawn(i as f64, 0.0, 0.0, 0.0);
+    }
     println!("Insert {N}: Vec  {:>8.2?}", start.elapsed());
 
     // 2. Erase + re-insert cycles (shows memory reuse advantage)
@@ -142,8 +186,14 @@ fn main() {
     let mut h = HivePool::new(N);
     let ptrs: Vec<*const Particle> = (0..N).map(|i| h.spawn(i as f64, 0.0, 0.0, 0.0)).collect();
     for _ in 0..10 {
-        for i in (0..N).step_by(3) { unsafe { h.despawn(ptrs[i]); } }
-        for i in (0..N).step_by(3) { h.spawn(i as f64, 0.0, 0.0, 0.0); }
+        for i in (0..N).step_by(3) {
+            unsafe {
+                h.despawn(ptrs[i]);
+            }
+        }
+        for i in (0..N).step_by(3) {
+            h.spawn(i as f64, 0.0, 0.0, 0.0);
+        }
     }
     println!("Erase/insert {N}: Hive {:>8.2?}", start.elapsed());
 
@@ -151,22 +201,35 @@ fn main() {
     let mut v = VecPool::new(N);
     let idxs: Vec<usize> = (0..N).map(|i| v.spawn(i as f64, 0.0, 0.0, 0.0)).collect();
     for _ in 0..10 {
-        for &idx in idxs.iter().step_by(3) { v.despawn(idx); }
-        for i in (0..N).step_by(3) { v.spawn(i as f64, 0.0, 0.0, 0.0); }
+        for &idx in idxs.iter().step_by(3) {
+            v.despawn(idx);
+        }
+        for i in (0..N).step_by(3) {
+            v.spawn(i as f64, 0.0, 0.0, 0.0);
+        }
     }
     println!("Erase/insert {N}: Vec  {:>8.2?}", start.elapsed());
 
     // 3. Iteration throughput
     let h = HivePool::new(N);
-    for i in 0..N { h.spawn(i as f64, 0.0, 0.0, 0.0); }
+    for i in 0..N {
+        h.spawn(i as f64, 0.0, 0.0, 0.0);
+    }
     let start = Instant::now();
     let sum: f64 = h.pool.iter().map(|p| p.x).sum();
     println!("Iterate {N}: Hive {:>8.2?} (sum={})", start.elapsed(), sum);
 
     let mut v = VecPool::new(N);
-    for i in 0..N { v.spawn(i as f64, 0.0, 0.0, 0.0); }
+    for i in 0..N {
+        v.spawn(i as f64, 0.0, 0.0, 0.0);
+    }
     let start = Instant::now();
-    let sum: f64 = v.particles.iter().filter_map(|p| p.as_ref()).map(|p| p.x).sum();
+    let sum: f64 = v
+        .particles
+        .iter()
+        .filter_map(|p| p.as_ref())
+        .map(|p| p.x)
+        .sum();
     println!("Iterate {N}: Vec  {:>8.2?} (sum={})", start.elapsed(), sum);
 
     // ── Memory comparison ──

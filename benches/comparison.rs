@@ -95,7 +95,9 @@ fn bench_hive_erase(b: &mut Bencher) {
     b.iter(|| {
         // Erase every 10th element
         for i in (0..N).step_by(10) {
-            unsafe { h.erase(&*ptrs[i]); }
+            unsafe {
+                h.erase(&*ptrs[i]);
+            }
         }
         // Re-insert to restore size
         for i in (0..N).step_by(10) {
@@ -154,7 +156,9 @@ fn bench_hive_mixed(b: &mut Bencher) {
             ptrs.push(h.insert(i));
         }
         for (i, &p) in ptrs.iter().enumerate().take(1000) {
-            unsafe { h.erase(&*p); }
+            unsafe {
+                h.erase(&*p);
+            }
             h.insert(i + 10_000);
         }
         test::black_box(h);
