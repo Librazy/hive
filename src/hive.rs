@@ -2,7 +2,7 @@
 
 use crate::allocator::{Allocator, Global};
 use core::marker::PhantomData;
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::mem::{needs_drop, ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 
 use crate::free_list;
@@ -1456,7 +1456,7 @@ impl<'a, T: Copy + 'a, A: Allocator + Clone> Extend<&'a T> for Hive<T, A> {
 impl<T, A: Allocator> Drop for Hive<T, A> {
     fn drop(&mut self) {
         let count = self.len;
-        if count > 0 {
+        if count > 0 && needs_drop::<T>() {
             unsafe {
                 let mut cur = self.begin;
                 for i in 0..count {

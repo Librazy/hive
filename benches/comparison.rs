@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hive::Hive;
 use std::collections::{LinkedList, VecDeque};
+use std::time::{Duration, Instant};
 
 const LARGE_N: usize = 100_000;
 const MIXED_N: usize = 2_000;
@@ -38,96 +39,196 @@ impl NonTrivialElement {
 fn bench_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("append");
     group.bench_function(BenchmarkId::new("Hive::insert", LARGE_N), |b| {
-        b.iter(|| {
-            let mut h = Hive::with_capacity(LARGE_N);
-            for i in 0..LARGE_N {
-                h.insert(black_box(i));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut h = Hive::with_capacity(LARGE_N);
+                for i in 0..LARGE_N {
+                    h.insert(black_box(i));
+                }
+                black_box(&mut h);
+                elapsed += start.elapsed();
             }
-            black_box(h);
+            elapsed
         });
     });
     group.bench_function(BenchmarkId::new("Vec::push", LARGE_N), |b| {
-        b.iter(|| {
-            let mut v = Vec::with_capacity(LARGE_N);
-            for i in 0..LARGE_N {
-                v.push(black_box(i));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut v = Vec::with_capacity(LARGE_N);
+                for i in 0..LARGE_N {
+                    v.push(black_box(i));
+                }
+                black_box(&mut v);
+                elapsed += start.elapsed();
             }
-            black_box(v);
+            elapsed
         });
     });
     group.bench_function(BenchmarkId::new("VecDeque::push_back", LARGE_N), |b| {
-        b.iter(|| {
-            let mut d = VecDeque::with_capacity(LARGE_N);
-            for i in 0..LARGE_N {
-                d.push_back(black_box(i));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut d = VecDeque::with_capacity(LARGE_N);
+                for i in 0..LARGE_N {
+                    d.push_back(black_box(i));
+                }
+                black_box(&mut d);
+                elapsed += start.elapsed();
             }
-            black_box(d);
+            elapsed
         });
     });
     group.bench_function(BenchmarkId::new("LinkedList::push_back", LARGE_N), |b| {
-        b.iter(|| {
-            let mut l = LinkedList::new();
-            for i in 0..LARGE_N {
-                l.push_back(black_box(i));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut l = LinkedList::new();
+                for i in 0..LARGE_N {
+                    l.push_back(black_box(i));
+                }
+                black_box(&mut l);
+                elapsed += start.elapsed();
             }
-            black_box(l);
+            elapsed
         });
     });
+    group.bench_function(
+        BenchmarkId::new("Hive::insert (no reserve)", LARGE_N),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let mut h = Hive::new();
+                    for i in 0..LARGE_N {
+                        h.insert(black_box(i));
+                    }
+                    black_box(&mut h);
+                    elapsed += start.elapsed();
+                }
+                elapsed
+            });
+        },
+    );
+    group.bench_function(BenchmarkId::new("Vec::push (no reserve)", LARGE_N), |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut v = Vec::new();
+                for i in 0..LARGE_N {
+                    v.push(black_box(i));
+                }
+                black_box(&mut v);
+                elapsed += start.elapsed();
+            }
+            elapsed
+        });
+    });
+    group.bench_function(
+        BenchmarkId::new("VecDeque::push_back (no reserve)", LARGE_N),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let mut d = VecDeque::new();
+                    for i in 0..LARGE_N {
+                        d.push_back(black_box(i));
+                    }
+                    black_box(&mut d);
+                    elapsed += start.elapsed();
+                }
+                elapsed
+            });
+        },
+    );
     group.finish();
 }
 
 fn bench_hive_insertion_paths(c: &mut Criterion) {
     let mut group = c.benchmark_group("hive_insertion_paths_non_trivial");
     group.bench_function(BenchmarkId::new("insert", INSERT_PATH_N), |b| {
-        b.iter(|| {
-            let mut h = Hive::with_capacity(INSERT_PATH_N);
-            for i in 0..INSERT_PATH_N {
-                h.insert(black_box(NonTrivialElement::new(i)));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut h = Hive::with_capacity(INSERT_PATH_N);
+                for i in 0..INSERT_PATH_N {
+                    h.insert(black_box(NonTrivialElement::new(i)));
+                }
+                black_box(&mut h);
+                elapsed += start.elapsed();
             }
-            black_box(h);
+            elapsed
         });
     });
     group.bench_function(BenchmarkId::new("emplace", INSERT_PATH_N), |b| {
-        b.iter(|| {
-            let mut h = Hive::with_capacity(INSERT_PATH_N);
-            for i in 0..INSERT_PATH_N {
-                h.emplace(|| black_box(NonTrivialElement::new(i)));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut h = Hive::with_capacity(INSERT_PATH_N);
+                for i in 0..INSERT_PATH_N {
+                    h.emplace(|| black_box(NonTrivialElement::new(i)));
+                }
+                black_box(&mut h);
+                elapsed += start.elapsed();
             }
-            black_box(h);
+            elapsed
         });
     });
     group.bench_function(BenchmarkId::new("insert_with", INSERT_PATH_N), |b| {
-        b.iter(|| {
-            let mut h = Hive::with_capacity(INSERT_PATH_N);
-            for i in 0..INSERT_PATH_N {
-                h.insert_with(|value: &mut NonTrivialElement| {
-                    value.reset(black_box(i));
-                });
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut h = Hive::with_capacity(INSERT_PATH_N);
+                for i in 0..INSERT_PATH_N {
+                    h.insert_with(|value: &mut NonTrivialElement| {
+                        value.reset(black_box(i));
+                    });
+                }
+                black_box(&mut h);
+                elapsed += start.elapsed();
             }
-            black_box(h);
+            elapsed
         });
     });
     group.bench_function(
         BenchmarkId::new("insert_with_reuse_erased", INSERT_PATH_N),
         |b| {
-            b.iter(|| {
-                let mut h = Hive::with_capacity(INSERT_PATH_N);
-                let ptrs: Vec<*const NonTrivialElement> = (0..INSERT_PATH_N)
-                    .map(|i| h.insert(NonTrivialElement::new(i)))
-                    .collect();
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let mut h = Hive::with_capacity(INSERT_PATH_N);
+                    let ptrs: Vec<*const NonTrivialElement> = (0..INSERT_PATH_N)
+                        .map(|i| h.insert(NonTrivialElement::new(i)))
+                        .collect();
 
-                for i in (0..INSERT_PATH_N).step_by(2) {
-                    unsafe {
-                        h.erase(ptrs[i]);
+                    for i in (0..INSERT_PATH_N).step_by(2) {
+                        unsafe {
+                            h.erase(ptrs[i]);
+                        }
                     }
-                }
 
-                for i in (0..INSERT_PATH_N).step_by(2) {
-                    h.insert_with(|value: &mut NonTrivialElement| {
-                        value.reset(black_box(i + INSERT_PATH_N));
-                    });
+                    for i in (0..INSERT_PATH_N).step_by(2) {
+                        h.insert_with(|value: &mut NonTrivialElement| {
+                            value.reset(black_box(i + INSERT_PATH_N));
+                        });
+                    }
+                    black_box(&mut h);
+                    black_box(&ptrs);
+                    elapsed += start.elapsed();
                 }
-                black_box(h);
+                elapsed
             });
         },
     );
