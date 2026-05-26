@@ -564,11 +564,30 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         T: Default,
         F: FnOnce(&mut T),
     {
-        let ptr = self.insert_mut(T::default());
+        let ptr = self.insert_default_mut();
         // SAFETY: `ptr` was just returned by this hive and points to a live,
         // initialized element. The mutable borrow is limited to this call.
         f(unsafe { &mut *ptr });
         ptr
+    }
+
+    fn insert_default_mut(&mut self) -> *mut T
+    where
+        T: Default,
+    {
+        unsafe {
+            if let Some(eg) = self.erasure_groups_head {
+                self.insert_default_reuse_erased(eg)
+            } else if let Some(tail) = self.tail {
+                if !(*tail.as_ptr()).is_full() {
+                    self.insert_default_append_tail()
+                } else {
+                    self.insert_default_new_group()
+                }
+            } else {
+                self.insert_default_first()
+            }
+        }
     }
 
     /// Constructs an element in-place in a hive slot.
@@ -622,6 +641,118 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             }
         } else {
             self.insert_first_with(f)
+        }
+    }
+
+    unsafe fn insert_default_first(&mut self) -> *mut T
+    where
+        T: Default,
+    {
+        let pending = self.prepare_unlinked_group(None);
+        let group = pending.as_ptr();
+        let mut guard = PendingGroupInsertion::new(self, pending, None);
+        let gp = group.as_ptr();
+        let ptr = (*gp).element_ptr_mut(0);
+        ptr.write(T::default());
+        guard.commit_first();
+        ptr
+    }
+
+    unsafe fn insert_default_append_tail(&mut self) -> *mut T
+    where
+        T: Default,
+    {
+        let mut end_cursor = self.end;
+        let end_group = end_cursor.group.unwrap();
+        let gp = end_group.as_ptr();
+        let elem_byte = end_cursor.element as *mut u8;
+        let ptr = elem_byte as *mut T;
+        ptr.write(T::default());
+        end_cursor.element = elem_byte.add((*gp).slot_size);
+        end_cursor.skipfield = end_cursor.skipfield.add(1);
+        self.end = end_cursor;
+        (*gp).active_count += 1;
+        self.len += 1;
+        ptr
+    }
+
+    unsafe fn insert_default_reuse_erased(&mut self, erasure_group: NonNull<Group<T, A>>) -> *mut T
+    where
+        T: Default,
+    {
+        let gp = erasure_group.as_ptr();
+        let slot_size = (*gp).slot_size;
+        let elements_base = (*gp).elements_base();
+        let skipfield_base = (*gp).skipfield_ptr();
+        let index = (*gp).free_list_head;
+        debug_assert_ne!(index, u16::MAX);
+        let next_free = free_list::head_next::<T, A>(erasure_group);
+        let new_elem_byte = elements_base.add(index as usize * slot_size);
+        let ptr = new_elem_byte as *mut T;
+        let new_sf = skipfield_base.add(index as usize);
+
+        let begin = self.begin;
+        let update_begin = begin
+            .group
+            .is_some_and(|bg| erasure_group == bg && (new_elem_byte as *const u8) < begin.element);
+
+        ptr.write(T::default());
+        free_list::pop_known_head::<T, A>(erasure_group, index, next_free);
+        skipfield::mark_constructed(erasure_group, index);
+        if (*gp).free_list_head == u16::MAX {
+            self.remove_from_erasures_list(erasure_group);
+        }
+        (*gp).active_count += 1;
+        self.len += 1;
+
+        if update_begin {
+            self.begin = make_cursor(erasure_group, new_elem_byte, new_sf);
+        }
+
+        ptr
+    }
+
+    unsafe fn insert_default_new_group(&mut self) -> *mut T
+    where
+        T: Default,
+    {
+        let prev = self.tail;
+        let pending = self.prepare_unlinked_group(prev);
+        let group = pending.as_ptr();
+        let mut guard = PendingGroupInsertion::new(self, pending, prev);
+        let gp = group.as_ptr();
+        let ptr = (*gp).element_ptr_mut(0);
+        ptr.write(T::default());
+        guard.commit_new_group();
+        ptr
+    }
+
+    unsafe fn prepare_unlinked_group(
+        &mut self,
+        prev: Option<NonNull<Group<T, A>>>,
+    ) -> PendingGroup<T, A> {
+        if let Some(group) = self.reserved_groups {
+            let gp = group.as_ptr();
+            self.reserved_groups = (*gp).next;
+            let gn = prev.map_or(0, |p| (*p.as_ptr()).group_number + 1);
+            (*gp).next = None;
+            (*gp).prev = prev;
+            (*gp).erasures_next = None;
+            (*gp).erasures_prev = None;
+            (*gp).free_list_head = u16::MAX;
+            (*gp).active_count = 0;
+            (*gp).group_number = gn;
+            core::ptr::write_bytes((*gp).skipfield_mut(), 0, (*gp).capacity as usize);
+            PendingGroup::Reserved {
+                group,
+                capacity_counted: self.head.is_some() || self.len == 0,
+            }
+        } else {
+            PendingGroup::Allocated(Group::allocate(
+                self.new_group_capacity(),
+                prev,
+                self.allocator.clone(),
+            ))
         }
     }
 
@@ -721,6 +852,114 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.end = Self::end_cursor_of(group, 1);
         self.len += 1;
         ptr
+    }
+}
+
+enum PendingGroup<T, A: Allocator> {
+    Allocated(NonNull<Group<T, A>>),
+    Reserved {
+        group: NonNull<Group<T, A>>,
+        capacity_counted: bool,
+    },
+}
+
+impl<T, A: Allocator> PendingGroup<T, A> {
+    fn as_ptr(&self) -> NonNull<Group<T, A>> {
+        match *self {
+            Self::Allocated(group) | Self::Reserved { group, .. } => group,
+        }
+    }
+
+    fn capacity_is_counted(&self) -> bool {
+        matches!(
+            *self,
+            Self::Reserved {
+                capacity_counted: true,
+                ..
+            }
+        )
+    }
+}
+
+struct PendingGroupInsertion<'a, T, A: Allocator + Clone> {
+    hive: &'a mut Hive<T, A>,
+    group: PendingGroup<T, A>,
+    prev: Option<NonNull<Group<T, A>>>,
+    committed: bool,
+}
+
+impl<'a, T, A: Allocator + Clone> PendingGroupInsertion<'a, T, A> {
+    fn new(
+        hive: &'a mut Hive<T, A>,
+        group: PendingGroup<T, A>,
+        prev: Option<NonNull<Group<T, A>>>,
+    ) -> Self {
+        Self {
+            hive,
+            group,
+            prev,
+            committed: false,
+        }
+    }
+
+    unsafe fn commit_first(&mut self) {
+        let group = self.group.as_ptr();
+        let gp = group.as_ptr();
+        debug_assert!(self.prev.is_none());
+        (*gp).active_count = 1;
+        if !self.group.capacity_is_counted() {
+            self.hive.capacity += (*gp).capacity as usize;
+        }
+        self.hive.head = Some(group);
+        self.hive.tail = Some(group);
+        self.hive.len = 1;
+        self.hive.begin = Hive::begin_cursor_of(group);
+        self.hive.end = Hive::end_cursor_of(group, 1);
+        self.committed = true;
+    }
+
+    unsafe fn commit_new_group(&mut self) {
+        let group = self.group.as_ptr();
+        let gp = group.as_ptr();
+        let prev = self.prev;
+        (*gp).active_count = 1;
+        if !self.group.capacity_is_counted() {
+            self.hive.capacity += (*gp).capacity as usize;
+        }
+        if let Some(p) = prev {
+            (*p.as_ptr()).next = Some(group);
+        }
+        if self.hive.head.is_none() {
+            self.hive.head = Some(group);
+        }
+        self.hive.tail = Some(group);
+        self.hive.end = Hive::end_cursor_of(group, 1);
+        self.hive.len += 1;
+        self.committed = true;
+    }
+}
+
+impl<T, A: Allocator + Clone> Drop for PendingGroupInsertion<'_, T, A> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        unsafe {
+            match self.group {
+                PendingGroup::Allocated(group) => Group::deallocate_group(group),
+                PendingGroup::Reserved { group, .. } => {
+                    let gp = group.as_ptr();
+                    (*gp).next = self.hive.reserved_groups;
+                    (*gp).prev = None;
+                    (*gp).erasures_next = None;
+                    (*gp).erasures_prev = None;
+                    (*gp).free_list_head = u16::MAX;
+                    (*gp).active_count = 0;
+                    self.hive.reserved_groups = Some(group);
+                }
+            }
+        }
     }
 }
 

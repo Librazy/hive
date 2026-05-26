@@ -126,6 +126,84 @@ fn test_insert_with_panic_leaves_default_value_inserted() {
     assert_eq!(h.iter().next().unwrap(), &vec![1]);
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PanicDefault(i32);
+
+impl Default for PanicDefault {
+    fn default() -> Self {
+        panic!("default failed")
+    }
+}
+
+#[test]
+fn test_insert_with_default_panic_leaves_empty_hive_unchanged() {
+    let mut h = Hive::<PanicDefault>::new();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.insert_with(|_| {});
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 0);
+    assert!(h.is_empty());
+}
+
+#[test]
+fn test_insert_with_default_panic_leaves_tail_append_unchanged() {
+    let mut h = Hive::new();
+    h.insert(PanicDefault(1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.insert_with(|_| {});
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 1);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![PanicDefault(1)]);
+}
+
+#[test]
+fn test_insert_with_default_panic_leaves_erased_slot_reusable() {
+    let mut h = Hive::new();
+    let erased = h.insert(PanicDefault(1));
+    h.insert(PanicDefault(2));
+
+    unsafe {
+        h.erase(erased);
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.insert_with(|_| {});
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 1);
+
+    h.insert(PanicDefault(3));
+    let mut values = h.iter().copied().collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, vec![PanicDefault(2), PanicDefault(3)]);
+}
+
+#[test]
+fn test_insert_with_default_panic_leaves_full_tail_unchanged() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(3, 3)).unwrap();
+    h.insert(PanicDefault(1));
+    h.insert(PanicDefault(2));
+    h.insert(PanicDefault(3));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.insert_with(|_| {});
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 3);
+    assert_eq!(
+        h.iter().copied().collect::<Vec<_>>(),
+        vec![PanicDefault(1), PanicDefault(2), PanicDefault(3),]
+    );
+}
+
 #[test]
 fn test_iter_single() {
     let mut h = Hive::new();
