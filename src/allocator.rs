@@ -9,7 +9,7 @@
 #[cfg(feature = "allocator_api")]
 pub use alloc::alloc::Global;
 #[cfg(feature = "allocator_api")]
-pub use core::alloc::Allocator;
+pub use core::alloc::{AllocError, Allocator};
 
 #[cfg(not(feature = "allocator_api"))]
 mod polyfill {

@@ -43,6 +43,11 @@ pub struct Hive<T, A: Allocator = Global> {
     allocator: A,
 }
 
+// SAFETY: `Hive` owns all elements and internal groups. Moving it to another
+// thread is sound when elements and the allocator can be sent there. Shared
+// concurrent access still requires external synchronization.
+unsafe impl<T: Send, A: Allocator + Send> Send for Hive<T, A> {}
+
 // ── Cursor helpers ──
 
 fn null_cursor<T, A: Allocator>() -> Cursor<T, A> {
@@ -509,6 +514,61 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Insert an element and return a mutable raw pointer.
     pub fn insert_mut(&mut self, value: T) -> *mut T {
         self.insert_raw_mut(value)
+    }
+
+    /// Constructs an element from a closure and inserts it.
+    ///
+    /// This is the safe counterpart to [`Hive::insert_with_uninit`]. The closure
+    /// returns a fully initialized value, so there is no external
+    /// `MaybeUninit<T>` safety contract. The closure is evaluated before the
+    /// hive reserves a slot, which keeps the hive unchanged if the closure
+    /// panics.
+    pub fn emplace<F>(&mut self, f: F) -> *const T
+    where
+        F: FnOnce() -> T,
+    {
+        self.insert(f())
+    }
+
+    /// Constructs an element from a closure, inserts it, and returns a mutable
+    /// raw pointer.
+    ///
+    /// See [`Hive::emplace`].
+    pub fn emplace_mut<F>(&mut self, f: F) -> *mut T
+    where
+        F: FnOnce() -> T,
+    {
+        self.insert_mut(f())
+    }
+
+    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
+    /// place before returning a stable pointer to it.
+    ///
+    /// Unlike [`Hive::insert_with_uninit`], this is safe because the closure
+    /// receives an initialized `&mut T`. If the closure panics, the default value
+    /// remains in the hive and will be dropped normally.
+    pub fn insert_with<F>(&mut self, f: F) -> *const T
+    where
+        T: Default,
+        F: FnOnce(&mut T),
+    {
+        self.insert_with_mut(f)
+    }
+
+    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
+    /// place before returning a stable mutable pointer to it.
+    ///
+    /// See [`Hive::insert_with`].
+    pub fn insert_with_mut<F>(&mut self, f: F) -> *mut T
+    where
+        T: Default,
+        F: FnOnce(&mut T),
+    {
+        let ptr = self.insert_mut(T::default());
+        // SAFETY: `ptr` was just returned by this hive and points to a live,
+        // initialized element. The mutable borrow is limited to this call.
+        f(unsafe { &mut *ptr });
+        ptr
     }
 
     /// Constructs an element in-place in a hive slot.
