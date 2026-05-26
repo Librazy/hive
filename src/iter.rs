@@ -1,8 +1,8 @@
 //! Iterator types for `Hive`: `Iter`, `IterMut`, `IntoIter`.
 
+use crate::allocator::Allocator;
 use crate::group::Group;
 use crate::skipfield::Cursor;
-use core::alloc::Allocator;
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::ptr::NonNull;

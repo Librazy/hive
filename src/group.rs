@@ -1,6 +1,7 @@
 //! Internal group (block) type for the hive.
 
-use core::alloc::{Allocator, Layout};
+use crate::allocator::Allocator;
+use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;

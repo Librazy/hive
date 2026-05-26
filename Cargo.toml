@@ -8,6 +8,7 @@ license = "Zlib"
 [features]
 default = ["std"]
 std = []
+allocator_api = []
 
 [dependencies]
 

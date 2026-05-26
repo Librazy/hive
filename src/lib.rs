@@ -1,11 +1,12 @@
 #![no_std]
-#![feature(allocator_api)]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 #[cfg(feature = "std")]
 extern crate std;
 
 extern crate alloc;
 
+pub(crate) mod allocator;
 mod free_list;
 mod group;
 mod skipfield;

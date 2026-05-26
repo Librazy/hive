@@ -1,7 +1,7 @@
 //! Jump-counting skipfield pattern and cursor types.
 
+use crate::allocator::Allocator;
 use crate::group::Group;
-use core::alloc::Allocator;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 

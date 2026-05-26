@@ -1,11 +1,9 @@
 //! A bucket-based, unordered container with stable references and O(1) insertion/erasure.
 
-use core::alloc::Allocator;
+use crate::allocator::{Allocator, Global};
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
-
-use alloc::alloc::Global;
 
 use crate::free_list;
 use crate::group::Group;
