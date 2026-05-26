@@ -1,7 +1,7 @@
 //! Inline free list stored in erased element memory slots.
 
+use crate::allocator::Allocator;
 use crate::group::Group;
-use core::alloc::Allocator;
 use core::ptr::NonNull;
 
 unsafe fn slot_addr(element_base: *mut u8, slot_size: usize, index: u16) -> *mut u8 {
