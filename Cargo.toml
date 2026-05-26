@@ -9,6 +9,7 @@ license = "Zlib"
 default = ["std"]
 std = []
 allocator_api = []
+safe_object_pool_custom_allocator = []
 
 [dependencies]
 

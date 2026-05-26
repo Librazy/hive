@@ -1,4 +1,9 @@
-use hive::{BlockCapacityLimits, Hive};
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
+use hive::allocator::Global;
+use hive::{BlockCapacityLimits, Hive, Pool, SyncPool};
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[test]
 fn test_new_empty() {
@@ -43,6 +48,82 @@ fn test_insert_with_uninit_mut() {
         *ptr += 1;
     }
     assert_eq!(h.iter().next(), Some(&42));
+}
+
+#[test]
+fn test_emplace() {
+    let mut h = Hive::new();
+    let ptr = h.emplace(|| String::from("hello"));
+
+    assert_eq!(h.len(), 1);
+    assert_eq!(unsafe { h.get(ptr) }.unwrap(), "hello");
+}
+
+#[test]
+fn test_emplace_mut() {
+    let mut h = Hive::new();
+    let ptr = h.emplace_mut(|| 41);
+
+    unsafe {
+        *ptr += 1;
+    }
+
+    assert_eq!(h.iter().next(), Some(&42));
+}
+
+#[test]
+fn test_emplace_panic_leaves_hive_unchanged() {
+    let mut h = Hive::new();
+    h.insert(1);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.emplace(|| -> i32 { panic!("construction failed") });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 1);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1]);
+}
+
+#[test]
+fn test_insert_with_default_initialized_slot() {
+    let mut h = Hive::new();
+    let ptr = h.insert_with(|value: &mut String| {
+        value.push_str("built in place");
+    });
+
+    assert_eq!(h.len(), 1);
+    assert_eq!(unsafe { h.get(ptr) }.unwrap(), "built in place");
+}
+
+#[test]
+fn test_insert_with_mut_default_initialized_slot() {
+    let mut h = Hive::new();
+    let ptr = h.insert_with_mut(|value: &mut Vec<i32>| {
+        value.extend([1, 2, 3]);
+    });
+
+    unsafe {
+        (*ptr).push(4);
+    }
+
+    assert_eq!(h.iter().next().unwrap(), &vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_insert_with_panic_leaves_default_value_inserted() {
+    let mut h = Hive::new();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.insert_with(|value: &mut Vec<i32>| {
+            value.push(1);
+            panic!("initialization failed");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 1);
+    assert_eq!(h.iter().next().unwrap(), &vec![1]);
 }
 
 #[test]
@@ -735,6 +816,316 @@ fn test_unique_by() {
     h.extend([1, 3, 4, 6, 7]);
     assert_eq!(h.unique_by(|a, b| a % 2 == b % 2), 2);
     assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 4, 7]);
+}
+
+#[test]
+fn test_pool_insert_returns_mutable_guard() {
+    let pool = Pool::new();
+    let mut value = pool.insert(41);
+
+    *value += 1;
+
+    assert_eq!(*value, 42);
+    assert_eq!(pool.len(), 1);
+    assert!(!pool.is_empty());
+}
+
+#[test]
+fn test_pool_emplace_returns_mutable_guard() {
+    let pool = Pool::new();
+    let mut value = pool.emplace(|| String::from("hello"));
+
+    value.push_str(" pool");
+
+    assert_eq!(&*value, "hello pool");
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_emplace_panic_leaves_pool_unchanged() {
+    let pool = Pool::new();
+    let value = pool.insert(1);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pool.emplace(|| -> i32 { panic!("construction failed") });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(*value, 1);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_insert_with_default_initialized_slot() {
+    let pool = Pool::new();
+    let value = pool.insert_with(|value: &mut String| {
+        value.push_str("pool value");
+    });
+
+    assert_eq!(&*value, "pool value");
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_insert_with_panic_erases_default_value() {
+    let pool = Pool::new();
+    let value = pool.insert(1);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pool.insert_with(|candidate: &mut i32| {
+            *candidate = 2;
+            panic!("initialization failed");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(*value, 1);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_allows_multiple_live_guards_and_insertions() {
+    let pool = Pool::new();
+    let mut first = pool.insert(String::from("first"));
+    let mut second = pool.insert(String::from("second"));
+
+    first.push_str(" value");
+    second.push_str(" value");
+    let third = pool.insert(String::from("third"));
+
+    assert_eq!(&*first, "first value");
+    assert_eq!(&*second, "second value");
+    assert_eq!(&*third, "third");
+    assert_eq!(pool.len(), 3);
+}
+
+#[test]
+fn test_pool_guard_erases_on_drop() {
+    let pool = Pool::new();
+    let first = pool.insert(1);
+    let second = pool.insert(2);
+    assert_eq!(pool.len(), 2);
+
+    drop(first);
+    assert_eq!(pool.len(), 1);
+
+    drop(second);
+    assert!(pool.is_empty());
+}
+
+#[test]
+fn test_pool_reuses_erased_slot() {
+    let pool = Pool::with_capacity(1);
+    let first = pool.insert(1);
+    let first_addr = (&*first) as *const i32 as usize;
+
+    drop(first);
+    let second = pool.insert(2);
+    let second_addr = (&*second) as *const i32 as usize;
+
+    assert_eq!(*second, 2);
+    assert_eq!(first_addr, second_addr);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_new_in_uses_allocator() {
+    let pool = Pool::<i32, Global>::new_in(Global);
+    let value = pool.insert(7);
+
+    assert_eq!(*value, 7);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_pool_with_capacity_in_uses_allocator() {
+    let pool = Pool::<i32, Global>::with_capacity_in(10, Global);
+
+    assert!(pool.capacity() >= 10);
+}
+
+#[test]
+fn test_pool_try_new_in_validates_limits() {
+    let pool = Pool::<i32, Global>::try_new_in(Global, BlockCapacityLimits::new(4, 16)).unwrap();
+    let value = pool.insert(11);
+
+    assert_eq!(*value, 11);
+    assert!(Pool::<i32, Global>::try_new_in(Global, BlockCapacityLimits::new(2, 16)).is_err());
+}
+
+#[test]
+fn test_sync_pool_guard_can_move_to_thread() {
+    let pool = SyncPool::new();
+    let value = pool.insert(41);
+
+    let value = std::thread::spawn(move || {
+        let mut value = value;
+        *value += 1;
+        assert_eq!(*value, 42);
+        value
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(*value, 42);
+    assert_eq!(pool.len(), 1);
+    drop(value);
+    assert!(pool.is_empty());
+}
+
+#[test]
+fn test_sync_pool_emplace_returns_mutable_guard() {
+    let pool = SyncPool::new();
+    let value = pool.emplace(|| String::from("hello"));
+
+    let value = std::thread::spawn(move || {
+        let mut value = value;
+        value.push_str(" sync");
+        value
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(&*value, "hello sync");
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_sync_pool_emplace_panic_leaves_pool_unchanged() {
+    let pool = SyncPool::new();
+    let value = pool.insert(1);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pool.emplace(|| -> i32 { panic!("construction failed") });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(*value, 1);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_sync_pool_insert_with_default_initialized_slot() {
+    let pool = SyncPool::new();
+    let value = pool.insert_with(|value: &mut String| {
+        value.push_str("sync value");
+    });
+
+    assert_eq!(&*value, "sync value");
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_sync_pool_insert_with_panic_erases_default_value() {
+    let pool = SyncPool::new();
+    let value = pool.insert(1);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pool.insert_with(|candidate: &mut i32| {
+            *candidate = 2;
+            panic!("initialization failed");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(*value, 1);
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn test_sync_pool_concurrent_insert_and_drop() {
+    let pool = SyncPool::with_capacity(16);
+    let mut threads = Vec::new();
+
+    for thread_id in 0..4 {
+        let pool = pool.clone();
+        threads.push(std::thread::spawn(move || {
+            for i in 0..100 {
+                let mut value = pool.insert(thread_id * 100 + i);
+                *value += 1;
+                assert_eq!(*value, thread_id * 100 + i + 1);
+            }
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert!(pool.is_empty());
+}
+
+#[test]
+fn test_sync_pool_live_guards_across_threads() {
+    let pool = SyncPool::new();
+    let mut first = pool.insert(String::from("first"));
+    let second = pool.insert(String::from("second"));
+
+    let thread = std::thread::spawn(move || {
+        let mut second = second;
+        second.push_str(" updated");
+        assert_eq!(&*second, "second updated");
+        second
+    });
+
+    first.push_str(" updated");
+    let second = thread.join().unwrap();
+
+    assert_eq!(&*first, "first updated");
+    assert_eq!(&*second, "second updated");
+    assert_eq!(pool.len(), 2);
+}
+
+#[test]
+fn test_sync_pool_allocator_constructors() {
+    let pool = SyncPool::<i32, Global>::with_capacity_in(8, Global);
+    assert!(pool.capacity() >= 8);
+
+    let value = pool.insert(5);
+    assert_eq!(*value, 5);
+
+    assert!(SyncPool::<i32, Global>::try_new_in(Global, BlockCapacityLimits::new(2, 16)).is_err());
+}
+
+#[derive(Clone)]
+struct DropCounter(Rc<Cell<usize>>);
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn test_pool_drops_elements_exactly_once() {
+    let drops = Rc::new(Cell::new(0));
+    let pool = Pool::new();
+    let first = pool.insert(DropCounter(drops.clone()));
+    let second = pool.insert(DropCounter(drops.clone()));
+
+    drop(first);
+    assert_eq!(drops.get(), 1);
+
+    drop(second);
+    assert_eq!(drops.get(), 2);
+
+    drop(pool);
+    assert_eq!(drops.get(), 2);
+}
+
+#[test]
+fn test_pool_drop_drops_remaining_elements() {
+    let drops = Rc::new(Cell::new(0));
+    let pool = Pool::new();
+    let first = pool.insert(DropCounter(drops.clone()));
+    let second = pool.insert(DropCounter(drops.clone()));
+
+    drop(first);
+    assert_eq!(drops.get(), 1);
+
+    std::mem::forget(second);
+    drop(pool);
+    assert_eq!(drops.get(), 2);
 }
 
 #[test]

@@ -6,12 +6,16 @@ extern crate std;
 
 extern crate alloc;
 
-pub(crate) mod allocator;
+pub mod allocator;
 mod free_list;
 mod group;
 mod skipfield;
 
 pub mod hive;
 mod iter;
+pub mod pool;
 
 pub use hive::{BlockCapacityLimits, Hive, InvalidBlockCapacityLimits};
+pub use pool::{Pool, Pooled};
+#[cfg(feature = "std")]
+pub use pool::{SyncPool, SyncPooled};
