@@ -9,7 +9,7 @@ fn bench_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("append");
     group.bench_function(BenchmarkId::new("Hive::insert", LARGE_N), |b| {
         b.iter(|| {
-            let h = Hive::with_capacity(LARGE_N);
+            let mut h = Hive::with_capacity(LARGE_N);
             for i in 0..LARGE_N {
                 h.insert(black_box(i));
             }
@@ -47,7 +47,7 @@ fn bench_append(c: &mut Criterion) {
 }
 
 fn bench_iteration(c: &mut Criterion) {
-    let hive = Hive::with_capacity(LARGE_N);
+    let mut hive = Hive::with_capacity(LARGE_N);
     for i in 0..LARGE_N as u64 {
         hive.insert(i);
     }
@@ -80,7 +80,7 @@ fn bench_erase_reinsert(c: &mut Criterion) {
 
             for i in (0..LARGE_N).step_by(10) {
                 unsafe {
-                    h.erase(&*ptrs[i]);
+                    h.erase(ptrs[i]);
                 }
             }
             for i in (0..LARGE_N).step_by(10) {
@@ -126,7 +126,7 @@ fn bench_mixed_stable_reference(c: &mut Criterion) {
 
             for (i, &p) in ptrs.iter().enumerate().take(MIXED_N / 2) {
                 unsafe {
-                    h.erase(&*p);
+                    h.erase(p);
                 }
                 h.insert(black_box(i + 10_000));
             }
@@ -147,7 +147,7 @@ fn bench_mixed_stable_reference(c: &mut Criterion) {
 }
 
 fn bench_pointer_access(c: &mut Criterion) {
-    let hive = Hive::with_capacity(LARGE_N);
+    let mut hive = Hive::with_capacity(LARGE_N);
     let ptrs: Vec<*const u64> = (0..LARGE_N as u64).map(|i| hive.insert(i)).collect();
     let vec: Vec<u64> = (0..LARGE_N as u64).collect();
 

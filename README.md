@@ -9,8 +9,8 @@ A Rust port of `plf::hive`, the bucket-based unordered container proposed for C+
 This crate is experimental and currently requires nightly Rust because it uses `allocator_api`.
 
 Implemented highlights:
-- Stable raw pointers from `insert` and `insert_mut`.
-- Safe reference insertion helpers: `insert_ref` and `insert_ref_mut`.
+- Stable raw pointers from `insert(&mut self)` and `insert_mut(&mut self)`.
+- Erasure by raw pointer (`erase(&mut self, *const T)`); pass `*const T` rather than `&T`/`&mut T` to avoid Stacked/Tree Borrows protector violations in the destroy-and-reuse step.
 - Unsafe in-place construction helpers using `MaybeUninit`.
 - Bidirectional iteration with `iter`, `iter_mut`, and `IntoIterator`.
 - Erased-slot reuse with O(1)-style insertion/erasure behavior.
@@ -48,7 +48,7 @@ unsafe {
 }
 
 unsafe {
-    hive.erase(&*b);
+    hive.erase(b);
 }
 
 let reused = hive.insert(40);
@@ -62,7 +62,7 @@ For emplace-like use cases, `Hive` exposes unsafe `MaybeUninit` APIs:
 ```rust
 use hive::Hive;
 
-let hive = Hive::new();
+let mut hive = Hive::new();
 
 let ptr = unsafe {
     hive.insert_with_uninit(|slot| {

@@ -18,7 +18,7 @@ fn main() {
 fn stable_references() {
     println!("--- Stable References ---");
 
-    let hive: Hive<&str> = Hive::new();
+    let mut hive: Hive<&str> = Hive::new();
     let hello = hive.insert("hello");
     let world = hive.insert("world");
     let rust = hive.insert("rust");
@@ -61,7 +61,7 @@ fn insert_and_erase() {
 
     // Erase the middle element
     unsafe {
-        hive.erase(&*p2);
+        hive.erase(p2);
     }
     println!("After erasing 2: {:?}", hive);
     assert_eq!(hive.len(), 2);
@@ -77,7 +77,7 @@ fn insert_and_erase() {
 fn bulk_insertion() {
     println!("--- Bulk Insertion ---");
 
-    let hive = Hive::with_capacity(100_000);
+    let mut hive = Hive::with_capacity(100_000);
     for i in 0..100_000 {
         hive.insert(i);
     }
@@ -113,7 +113,7 @@ fn retain_and_sort() {
 fn iteration() {
     println!("--- Bidirectional Iteration ---");
 
-    let hive = Hive::new();
+    let mut hive = Hive::new();
     for c in 'a'..='j' {
         hive.insert(c);
     }
