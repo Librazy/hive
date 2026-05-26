@@ -9,7 +9,7 @@ fn test_new_empty() {
 
 #[test]
 fn test_insert_one() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(42);
     assert!(!h.is_empty());
     assert_eq!(h.len(), 1);
@@ -17,7 +17,7 @@ fn test_insert_one() {
 
 #[test]
 fn test_insert_with_uninit() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     let ptr = unsafe {
         h.insert_with_uninit(|slot| {
             slot.write(String::from("hello"));
@@ -32,7 +32,7 @@ fn test_insert_with_uninit() {
 
 #[test]
 fn test_insert_with_uninit_mut() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     let ptr = unsafe {
         h.insert_with_uninit_mut(|slot| {
             slot.write(41);
@@ -47,14 +47,14 @@ fn test_insert_with_uninit_mut() {
 
 #[test]
 fn test_iter_single() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(42);
     assert_eq!(h.iter().next(), Some(&42));
 }
 
 #[test]
 fn test_iter_multiple() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..100 {
         h.insert(i);
     }
@@ -64,7 +64,7 @@ fn test_iter_multiple() {
 
 #[test]
 fn test_double_ended_iter() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..10 {
         h.insert(i);
     }
@@ -85,7 +85,7 @@ fn test_double_ended_iter() {
 
 #[test]
 fn test_next_back_single_element() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(42);
     assert_eq!(h.iter().next_back(), Some(&42));
 }
@@ -98,7 +98,7 @@ fn test_erase_basic() {
     assert_eq!(h.len(), 2);
 
     unsafe {
-        h.erase(&*r0);
+        h.erase(r0);
     }
     assert_eq!(h.len(), 1);
 
@@ -114,7 +114,7 @@ fn test_erase_from_middle() {
     h.insert(3);
 
     unsafe {
-        h.erase(&*r2);
+        h.erase(r2);
     }
 
     let mut sorted: Vec<i32> = h.iter().copied().collect();
@@ -130,7 +130,7 @@ fn test_insert_after_erase() {
     h.insert(3);
 
     unsafe {
-        h.erase(&*r2);
+        h.erase(r2);
     }
     h.insert(4);
 
@@ -147,7 +147,7 @@ fn test_insert_with_uninit_reuses_erased_slot() {
     let erased = h.insert(2);
     h.insert(3);
     unsafe {
-        h.erase(&*erased);
+        h.erase(erased);
     }
 
     let inserted = unsafe {
@@ -169,7 +169,7 @@ fn test_erase_all_one_by_one() {
 
     for r in &refs {
         unsafe {
-            h.erase(&**r);
+            h.erase(*r);
         }
     }
     assert!(h.is_empty());
@@ -181,7 +181,7 @@ fn test_insert_after_empty_reuses_reserved_capacity() {
     let ptr = h.insert(1);
     let cap = h.capacity();
     unsafe {
-        h.erase(&*ptr);
+        h.erase(ptr);
     }
     assert_eq!(h.len(), 0);
     h.insert(2);
@@ -214,7 +214,7 @@ fn test_reserve() {
 
 #[test]
 fn test_with_capacity() {
-    let h: Hive<i32> = Hive::with_capacity(200);
+    let mut h: Hive<i32> = Hive::with_capacity(200);
     assert!(h.capacity() >= 200);
     for i in 0..200 {
         h.insert(i);
@@ -280,7 +280,7 @@ fn test_large_reserve_uses_max_capacity_blocks() {
 
 #[test]
 fn test_clone() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..50 {
         h.insert(i);
     }
@@ -389,7 +389,7 @@ fn test_sort_by_desc() {
 
 #[test]
 fn test_stable_references() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     let r1 = h.insert(10);
     let r2 = h.insert(20);
     let r3 = h.insert(30);
@@ -421,7 +421,7 @@ fn test_iter_mut() {
 
 #[test]
 fn test_into_iter() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..50 {
         h.insert(i);
     }
@@ -443,7 +443,7 @@ fn test_into_iter_drops_remaining_elements() {
 
     DROP_COUNT.store(0, Ordering::SeqCst);
     {
-        let h = Hive::new();
+        let mut h = Hive::new();
         for _ in 0..10 {
             h.insert(DropCounter);
         }
@@ -455,7 +455,7 @@ fn test_into_iter_drops_remaining_elements() {
 
 #[test]
 fn test_exact_size() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..30 {
         h.insert(i);
     }
@@ -479,7 +479,7 @@ fn test_drop_non_trivial() {
 
     DROP_COUNT.store(0, Ordering::SeqCst);
     {
-        let h: Hive<DropCounter> = Hive::new();
+        let mut h: Hive<DropCounter> = Hive::new();
         for i in 0..100 {
             h.insert(DropCounter { _val: i });
         }
@@ -500,7 +500,7 @@ fn test_stress_insert_erase() {
 
         for r in &refs {
             unsafe {
-                h.erase(&**r);
+                h.erase(*r);
             }
         }
         assert!(h.is_empty());
@@ -514,7 +514,7 @@ fn test_alternating_erase() {
 
     for i in (0..500).step_by(2) {
         unsafe {
-            h.erase(&*refs[i]);
+            h.erase(refs[i]);
         }
     }
 
@@ -533,7 +533,7 @@ fn test_erase_and_reinsert_reuse() {
     // Erase every 3rd
     for i in (0..200).step_by(3) {
         unsafe {
-            h.erase(&*refs[i]);
+            h.erase(refs[i]);
         }
     }
 
@@ -560,13 +560,13 @@ fn test_reinsert_inside_merged_skipblock() {
     let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
 
     unsafe {
-        h.erase(&*refs[2]);
+        h.erase(refs[2]);
     }
     unsafe {
-        h.erase(&*refs[4]);
+        h.erase(refs[4]);
     }
     unsafe {
-        h.erase(&*refs[3]);
+        h.erase(refs[3]);
     }
 
     h.insert(100);
@@ -579,7 +579,7 @@ fn test_reinsert_inside_merged_skipblock() {
 
 #[test]
 fn test_small_type_u8() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0u8..100 {
         h.insert(i);
     }
@@ -591,7 +591,7 @@ fn test_small_type_u8() {
 
 #[test]
 fn test_rev_iter() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..5 {
         h.insert(i);
     }
@@ -601,7 +601,7 @@ fn test_rev_iter() {
 
 #[test]
 fn test_nth() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..100 {
         h.insert(i);
     }
@@ -612,7 +612,7 @@ fn test_nth() {
 
 #[test]
 fn test_fused() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(1);
     let mut it = h.iter();
     assert_eq!(it.next(), Some(&1));
@@ -623,7 +623,7 @@ fn test_fused() {
 
 #[test]
 fn test_last() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(1);
     h.insert(2);
     h.insert(3);
@@ -638,7 +638,7 @@ fn test_default() {
 
 #[test]
 fn test_debug() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(1);
     h.insert(2);
     let s = format!("{h:?}");
@@ -682,7 +682,7 @@ fn test_get_and_iter_from_pointer() {
     );
 
     unsafe {
-        h.erase(&*p1);
+        h.erase(p1);
     }
     assert_eq!(unsafe { h.get(p1) }, None);
 }
@@ -715,7 +715,7 @@ fn test_assign_and_assign_from_iter() {
 
 #[test]
 fn test_insert_many() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     h.insert(1);
     h.insert_many([2, 3, 4]);
     assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
@@ -773,7 +773,7 @@ fn test_erase_and_iterate() {
 
     for i in (0..100).step_by(3) {
         unsafe {
-            h.erase(&*refs[i]);
+            h.erase(refs[i]);
         }
     }
 
@@ -788,7 +788,7 @@ fn test_concurrent_erase_insert() {
 
     for i in (0..500).step_by(2) {
         unsafe {
-            h.erase(&*refs[i]);
+            h.erase(refs[i]);
         }
     }
 
@@ -811,7 +811,7 @@ fn test_concurrent_erase_insert() {
 
 #[test]
 fn test_count_consuming() {
-    let h = Hive::new();
+    let mut h = Hive::new();
     for i in 0..50 {
         h.insert(i);
     }
@@ -819,144 +819,27 @@ fn test_count_consuming() {
     assert_eq!(h.len(), 50);
 }
 
-// ── Safe ref API tests ──
+// ── erase via pointer obtained from iter_mut ──
 
 #[test]
-fn test_insert_ref_basic() {
-    let hive = Hive::new();
-    let r = hive.insert_ref(42);
-    assert_eq!(*r, 42);
-    assert_eq!(hive.len(), 1);
-}
+fn test_erase_pointer_from_iter_mut() {
+    let mut h = Hive::new();
+    h.insert(1);
+    h.insert(2);
+    h.insert(3);
 
-#[test]
-fn test_insert_ref_multiple() {
-    let hive = Hive::new();
-    let a = hive.insert_ref(1);
-    let b = hive.insert_ref(2);
-    let c = hive.insert_ref(3);
-    // All live simultaneously through &self
-    assert_eq!(*a, 1);
-    assert_eq!(*b, 2);
-    assert_eq!(*c, 3);
-    assert_eq!(hive.len(), 3);
-
-    // Iteration still works while refs are held
-    let sum: i32 = hive.iter().sum();
-    assert_eq!(sum, 6);
-}
-
-#[test]
-fn test_insert_ref_stable_under_insertion() {
-    let hive = Hive::new();
-    let a = hive.insert_ref(10);
-    let b = hive.insert_ref(20);
-
-    // Insert many more — a and b remain valid
-    for i in 0..1000 {
-        hive.insert_ref(i);
-    }
-    assert_eq!(*a, 10);
-    assert_eq!(*b, 20);
-}
-
-#[test]
-fn test_insert_ref_and_iterate() {
-    let hive = Hive::new();
-    let markers: Vec<&i32> = (0..10).map(|i| hive.insert_ref(i)).collect();
-
-    // Iteration sees all elements regardless of outstanding refs
-    let sum: i32 = hive.iter().sum();
-    assert_eq!(sum, 45);
-
-    // And all original refs are still valid
-    for (i, r) in markers.iter().enumerate() {
-        assert_eq!(**r, i as i32);
-    }
-}
-
-#[test]
-fn test_insert_ref_then_erase() {
-    let mut hive = Hive::new();
-
-    {
-        let a = hive.insert_ref(1);
-        let b = hive.insert_ref(2);
-        assert_eq!(*a, 1);
-        assert_eq!(*b, 2);
-        // a, b dropped here — now &mut self is available
-    }
-
-    // Can erase using pointer obtained previously
-    let p = hive.insert(99);
+    // Locate element 2 via iter_mut, capture a *mut so the provenance keeps
+    // write permission, drop the &mut T, then erase by raw ptr.
+    let ptr: *mut i32 = h
+        .iter_mut()
+        .find(|v| **v == 2)
+        .map(|v| v as *mut i32)
+        .expect("element 2 should exist");
     unsafe {
-        hive.erase(&*p);
+        h.erase(ptr);
     }
-    assert_eq!(hive.len(), 2);
-}
-
-#[test]
-fn test_insert_ref_no_clone_needed() {
-    // insert_ref takes T by value with &self — no Clone required
-    let hive = Hive::new();
-    let r = hive.insert_ref(String::from("hello"));
-    assert_eq!(r, "hello");
-}
-
-#[test]
-fn test_insert_ref_mut() {
-    let mut hive = Hive::new();
-    let r = hive.insert_ref_mut(42);
-    *r = 99;
-    assert_eq!(hive.iter().next(), Some(&99));
-}
-
-#[test]
-fn test_insert_ref_mut_single_only() {
-    let mut hive = Hive::new();
-    let r = hive.insert_ref_mut(1);
-    // Can't insert again while r borrows &mut self
-    // hive.insert(2); // would not compile
-    *r = 10;
-    assert_eq!(*r, 10);
-}
-
-#[test]
-fn test_insert_ref_with_capacity() {
-    let hive = Hive::with_capacity(500);
-    let refs: Vec<&i32> = (0..500).map(|i| hive.insert_ref(i)).collect();
-    assert_eq!(hive.len(), 500);
-    for (i, r) in refs.iter().enumerate() {
-        assert_eq!(**r, i as i32);
-    }
-}
-
-#[test]
-fn test_insert_ref_erase_multiple() {
-    let mut hive = Hive::new();
-    let ptrs: Vec<*const i32> = (0..100).map(|i| hive.insert(i)).collect();
-
-    // Erase half
-    for i in (0..100).step_by(2) {
-        unsafe {
-            hive.erase(&*ptrs[i]);
-        }
-    }
-
-    // Re-insert via safe API
-    for i in 200..250 {
-        hive.insert_ref(i);
-    }
-
-    assert_eq!(hive.len(), 100);
-    use std::collections::HashSet;
-    let vals: HashSet<i32> = hive.iter().copied().collect();
-    for i in 0..100 {
-        if i % 2 == 1 {
-            assert!(vals.contains(&i), "missing {i}");
-        }
-    }
-    for i in 200..250 {
-        assert!(vals.contains(&i), "missing {i}");
-    }
+    assert_eq!(h.len(), 2);
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, vec![1, 3]);
 }
