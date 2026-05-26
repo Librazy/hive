@@ -4,6 +4,36 @@ use std::collections::{LinkedList, VecDeque};
 
 const LARGE_N: usize = 100_000;
 const MIXED_N: usize = 2_000;
+const INSERT_PATH_N: usize = 10_000;
+
+#[derive(Clone, Default)]
+struct NonTrivialElement {
+    name: String,
+    data: Vec<u64>,
+    checksum: u64,
+}
+
+impl NonTrivialElement {
+    fn new(i: usize) -> Self {
+        let data = vec![i as u64, i as u64 + 1, i as u64 + 2, i as u64 + 3];
+        let checksum = data.iter().copied().fold(i as u64, u64::wrapping_add);
+        Self {
+            name: format!("element-{i}"),
+            data,
+            checksum,
+        }
+    }
+
+    fn reset(&mut self, i: usize) {
+        self.name.clear();
+        self.name.push_str("element-");
+        self.name.push_str(&i.to_string());
+        self.data.clear();
+        self.data
+            .extend([i as u64, i as u64 + 1, i as u64 + 2, i as u64 + 3]);
+        self.checksum = self.data.iter().copied().fold(i as u64, u64::wrapping_add);
+    }
+}
 
 fn bench_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("append");
@@ -43,6 +73,64 @@ fn bench_append(c: &mut Criterion) {
             black_box(l);
         });
     });
+    group.finish();
+}
+
+fn bench_hive_insertion_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hive_insertion_paths_non_trivial");
+    group.bench_function(BenchmarkId::new("insert", INSERT_PATH_N), |b| {
+        b.iter(|| {
+            let mut h = Hive::with_capacity(INSERT_PATH_N);
+            for i in 0..INSERT_PATH_N {
+                h.insert(black_box(NonTrivialElement::new(i)));
+            }
+            black_box(h);
+        });
+    });
+    group.bench_function(BenchmarkId::new("emplace", INSERT_PATH_N), |b| {
+        b.iter(|| {
+            let mut h = Hive::with_capacity(INSERT_PATH_N);
+            for i in 0..INSERT_PATH_N {
+                h.emplace(|| black_box(NonTrivialElement::new(i)));
+            }
+            black_box(h);
+        });
+    });
+    group.bench_function(BenchmarkId::new("insert_with", INSERT_PATH_N), |b| {
+        b.iter(|| {
+            let mut h = Hive::with_capacity(INSERT_PATH_N);
+            for i in 0..INSERT_PATH_N {
+                h.insert_with(|value: &mut NonTrivialElement| {
+                    value.reset(black_box(i));
+                });
+            }
+            black_box(h);
+        });
+    });
+    group.bench_function(
+        BenchmarkId::new("insert_with_reuse_erased", INSERT_PATH_N),
+        |b| {
+            b.iter(|| {
+                let mut h = Hive::with_capacity(INSERT_PATH_N);
+                let ptrs: Vec<*const NonTrivialElement> = (0..INSERT_PATH_N)
+                    .map(|i| h.insert(NonTrivialElement::new(i)))
+                    .collect();
+
+                for i in (0..INSERT_PATH_N).step_by(2) {
+                    unsafe {
+                        h.erase(ptrs[i]);
+                    }
+                }
+
+                for i in (0..INSERT_PATH_N).step_by(2) {
+                    h.insert_with(|value: &mut NonTrivialElement| {
+                        value.reset(black_box(i + INSERT_PATH_N));
+                    });
+                }
+                black_box(h);
+            });
+        },
+    );
     group.finish();
 }
 
@@ -177,6 +265,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(20);
     targets = bench_append,
+        bench_hive_insertion_paths,
         bench_iteration,
         bench_erase_reinsert,
         bench_mixed_stable_reference,

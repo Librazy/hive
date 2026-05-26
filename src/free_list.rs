@@ -16,6 +16,13 @@ unsafe fn read_next(element_base: *const u8, slot_size: usize, index: u16) -> u1
     unsafe { *((slot_addr_const(element_base, slot_size, index) as *const u16).add(1)) }
 }
 
+pub(crate) unsafe fn head_next<T, A: Allocator>(group: NonNull<Group<T, A>>) -> u16 {
+    let gp = group.as_ptr();
+    let idx = (*gp).free_list_head;
+    debug_assert_ne!(idx, u16::MAX);
+    read_next((*gp).elements_base(), (*gp).slot_size, idx)
+}
+
 unsafe fn write_prev(element_base: *mut u8, slot_size: usize, index: u16, prev: u16) {
     unsafe {
         *(slot_addr(element_base, slot_size, index) as *mut u16) = prev;
@@ -61,6 +68,19 @@ pub(crate) unsafe fn pop_free_slot<T, A: Allocator>(group: NonNull<Group<T, A>>)
     }
     (*gp).free_list_head = next_idx;
     idx
+}
+
+pub(crate) unsafe fn pop_known_head<T, A: Allocator>(
+    group: NonNull<Group<T, A>>,
+    index: u16,
+    next_idx: u16,
+) {
+    let gp = group.as_ptr();
+    debug_assert_eq!((*gp).free_list_head, index);
+    if next_idx != u16::MAX {
+        write_prev((*gp).elements_base(), (*gp).slot_size, next_idx, u16::MAX);
+    }
+    (*gp).free_list_head = next_idx;
 }
 
 #[allow(dead_code)]
