@@ -1,4 +1,27 @@
 //! A bucket-based, unordered container with stable references and O(1) insertion/erasure.
+//!
+//! This module provides [`Hive<T>`], the core data structure of this crate, along
+//! with the supporting types [`BlockCapacityLimits`] and
+//! [`InvalidBlockCapacityLimits`].
+//!
+//! # Architecture
+//!
+//! `Hive` stores elements across multiple memory blocks (called *groups*). Each
+//! block holds a contiguous array of element slots, a per-group skipfield (for
+//! efficient O(1) forward/backward traversal over erased slots), and a
+//! free-list for erased-slot reuse.
+//!
+//! When an element is erased, its slot is added to the free-list of its group
+//! and the skipfield is updated so that iteration skips over it. When a new
+//! element is inserted, the hive first checks for an erased slot; if one is
+//! found it is reused immediately. Otherwise, the element is appended to the
+//! tail group (allocating a new group if the tail is full).
+//!
+//! # Stable pointers
+//!
+//! Pointers returned by insertion methods remain valid until the element is
+//! erased. Erasing or inserting other elements never moves existing ones. This
+//! is the primary motivation for `Hive` over `Vec` and `VecDeque`.
 
 use crate::allocator::{Allocator, Global};
 use core::marker::PhantomData;
@@ -14,21 +37,79 @@ const DEFAULT_MIN_BLOCK_CAPACITY: u16 = 8;
 const DEFAULT_MAX_BLOCK_CAPACITY: u16 = 8192;
 const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
 
+/// Constraints on the size of internal memory blocks (groups).
+///
+/// Every group allocated by a [`Hive`] will have a capacity between `min` and
+/// `max` (inclusive). The limits affect memory usage and allocation granularity.
+///
+/// Default limits are 8–8192. The hard lower bound is 3, and the upper bound is
+/// `u16::MAX - 1`.
+///
+/// Pass custom limits to [`Hive::try_new`] or [`Hive::try_new_in`].
+///
+/// # Examples
+///
+/// ```
+/// use hive::{BlockCapacityLimits, Hive};
+///
+/// let mut hive: Hive<i32> = Hive::try_new(BlockCapacityLimits::new(4, 256)).unwrap();
+/// assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(4, 256));
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockCapacityLimits {
+    /// Minimum elements per block.
     pub min: u16,
+    /// Maximum elements per block.
     pub max: u16,
 }
 
+/// Error returned when block capacity limits are invalid.
+///
+/// Limits must satisfy `hard_min ≤ min ≤ max ≤ hard_max` where
+/// `hard_min = 3` and `hard_max = u16::MAX - 1`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidBlockCapacityLimits;
 
 impl BlockCapacityLimits {
+    /// Creates new block capacity limits.
+    ///
+    /// This is a `const fn` and does **not** validate the values. Use
+    /// [`Hive::try_new`] or [`Hive::try_new_in`] to check validity.
     pub const fn new(min: u16, max: u16) -> Self {
         Self { min, max }
     }
 }
 
+/// A bucket-based, unordered container with stable element addresses.
+///
+/// `Hive<T>` supports O(1) amortized insertion and erasure, immediate reuse of
+/// erased slots, and bidirectional iteration. It is a Rust port of the C++
+/// `plf::hive` container proposed as `std::hive` in [P0447](https://wg21.link/p0447).
+///
+/// # Type parameters
+///
+/// - `T` — the element type.
+/// - `A` — the allocator type; defaults to [`Global`].
+///
+/// # Pointer stability
+///
+/// Raw pointers from [`insert`](Hive::insert) and
+/// [`insert_mut`](Hive::insert_mut) remain valid until the element is erased.
+/// Inserting other elements never moves existing ones.
+///
+/// # Examples
+///
+/// ```
+/// use hive::Hive;
+///
+/// let mut hive = Hive::new();
+/// let a = hive.insert(10);
+/// let b = hive.insert(20);
+///
+/// unsafe { hive.erase(b); }
+/// let reused = hive.insert(30);
+/// assert_eq!(reused, b); // erased slot reused immediately
+/// ```
 pub struct Hive<T, A: Allocator = Global> {
     head: Option<NonNull<Group<T, A>>>,
     tail: Option<NonNull<Group<T, A>>>,
@@ -91,6 +172,10 @@ impl<T, A: Allocator> Hive<T, A> {
 // ── Construction ──
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
+    /// Creates an empty hive using the given allocator.
+    ///
+    /// Default block capacity limits (8–8192) are used. To customize limits,
+    /// use [`try_new_in`](Hive::try_new_in).
     pub fn new_in(allocator: A) -> Self {
         Self {
             head: None,
@@ -107,6 +192,11 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
     }
 
+    /// Creates an empty hive using the given allocator and custom block
+    /// capacity limits.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if the limits are out of bounds
+    /// (see [`BlockCapacityLimits`]).
     pub fn try_new_in(
         allocator: A,
         limits: BlockCapacityLimits,
@@ -120,16 +210,26 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 }
 
 impl<T> Hive<T, Global> {
+    /// Creates an empty hive with the global allocator and default block
+    /// capacity limits (8–8192).
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 
+    /// Creates an empty hive with space pre-allocated for at least `cap`
+    /// elements.
+    ///
+    /// Equivalent to constructing a new hive and calling
+    /// [`reserve(cap)`](Hive::reserve).
     pub fn with_capacity(cap: usize) -> Self {
         let mut hive = Self::new();
         hive.reserve(cap);
         hive
     }
 
+    /// Creates an empty hive with custom block capacity limits.
+    ///
+    /// Shortcut for `Self::try_new_in(Global, limits)`.
     pub fn try_new(limits: BlockCapacityLimits) -> Result<Self, InvalidBlockCapacityLimits> {
         Self::try_new_in(Global, limits)
     }
@@ -144,30 +244,45 @@ impl<T> Default for Hive<T, Global> {
 // ── Size ──
 
 impl<T, A: Allocator> Hive<T, A> {
+    /// Returns the number of live elements.
     pub fn len(&self) -> usize {
         self.len
     }
+    /// Returns `true` if the hive contains no elements.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    /// Returns the total number of element slots across all allocated and
+    /// reserved groups.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+    /// Returns the maximum possible element count for this hive.
+    ///
+    /// This is `usize::MAX / slot_size` and is effectively unbounded for
+    /// practical element sizes.
     pub fn max_size(&self) -> usize {
         usize::MAX / Group::<T, A>::compute_slot_size()
     }
+    /// Returns the current block capacity limits.
     pub fn block_capacity_limits(&self) -> BlockCapacityLimits {
         BlockCapacityLimits::new(self.min_block_capacity, self.max_block_capacity)
     }
 
+    /// Returns the default block capacity limits (8–8192).
     pub const fn block_capacity_default_limits() -> BlockCapacityLimits {
         BlockCapacityLimits::new(DEFAULT_MIN_BLOCK_CAPACITY, DEFAULT_MAX_BLOCK_CAPACITY)
     }
 
+    /// Returns the hard bounds for block capacity limits.
+    ///
+    /// Minimum is 3 (required for the skipfield algorithm). Maximum is
+    /// `u16::MAX - 1`.
     pub const fn block_capacity_hard_limits() -> BlockCapacityLimits {
         BlockCapacityLimits::new(HARD_MIN_BLOCK_CAPACITY, u16::MAX - 1)
     }
 
+    /// Returns a reference to the allocator.
     pub fn get_allocator(&self) -> &A {
         &self.allocator
     }
@@ -239,39 +354,57 @@ impl<T, A: Allocator> Hive<T, A> {
 // ── Iteration ──
 
 impl<T, A: Allocator> Hive<T, A> {
+    /// Returns an iterator over shared references to all live elements, in
+    /// insertion order.
     pub fn iter(&self) -> Iter<'_, T, A> {
         unsafe { Iter::new(self.begin, self.end, self.len) }
     }
+    /// Returns an iterator over mutable references to all live elements, in
+    /// insertion order.
     pub fn iter_mut(&mut self) -> IterMut<'_, T, A> {
         unsafe { IterMut::new(self.begin, self.end, self.len) }
     }
 
-    /// Returns a shared reference for a pointer previously returned by this hive.
+    /// Returns a shared reference for a pointer previously returned by this
+    /// hive.
+    ///
+    /// Returns `None` if the pointer points to an erased element, is outside
+    /// any allocated group, or was never originated by this hive.
     ///
     /// # Safety
-    /// `ptr` must be either null/foreign/erased, or a valid pointer returned by
-    /// this hive for an element that has not been erased. Passing arbitrary
-    /// pointers may be undefined behavior because pointer provenance and bounds
-    /// cannot be validated completely.
+    ///
+    /// `ptr` must be either null, a valid pointer returned by this hive for an
+    /// element that has not been erased, or a pointer previously returned by
+    /// this hive that has since been erased (which returns `None`). Passing an
+    /// arbitrary foreign pointer may produce a garbage `Option` and may be
+    /// undefined behavior due to pointer provenance and bounds checking limits.
     pub unsafe fn get(&self, ptr: *const T) -> Option<&T> {
         let cursor = unsafe { self.cursor_from_ptr(ptr)? };
         unsafe { Some(&*(cursor.element as *const T)) }
     }
 
-    /// Returns a mutable reference for a pointer previously returned by this hive.
+    /// Returns a mutable reference for a pointer previously returned by this
+    /// hive.
+    ///
+    /// Returns `None` under the same conditions as [`get`](Hive::get).
     ///
     /// # Safety
-    /// See [`Hive::get`]. The caller must also ensure there are no aliases to
-    /// the same element for the duration of the returned mutable borrow.
+    ///
+    /// See [`get`](Hive::get). The caller must also ensure there are no other
+    /// `&T` or `&mut T` references to the same element for the duration of the
+    /// returned mutable borrow.
     pub unsafe fn get_mut(&mut self, ptr: *const T) -> Option<&mut T> {
         let cursor = unsafe { self.cursor_from_ptr(ptr)? };
         unsafe { Some(&mut *(cursor.element as *mut T)) }
     }
 
-    /// Returns an iterator beginning at `ptr`.
+    /// Returns an iterator over shared references beginning at `ptr`.
+    ///
+    /// Returns `None` if `ptr` is not a valid live element.
     ///
     /// # Safety
-    /// See [`Hive::get`].
+    ///
+    /// See [`get`](Hive::get).
     pub unsafe fn iter_from(&self, ptr: *const T) -> Option<Iter<'_, T, A>> {
         let cursor = unsafe { self.cursor_from_ptr(ptr)? };
         let remaining = unsafe { self.count_from_cursor(cursor) };
@@ -280,8 +413,11 @@ impl<T, A: Allocator> Hive<T, A> {
 
     /// Returns a mutable iterator beginning at `ptr`.
     ///
+    /// Returns `None` if `ptr` is not a valid live element.
+    ///
     /// # Safety
-    /// See [`Hive::get_mut`].
+    ///
+    /// See [`get_mut`](Hive::get_mut).
     pub unsafe fn iter_mut_from(&mut self, ptr: *const T) -> Option<IterMut<'_, T, A>> {
         let cursor = unsafe { self.cursor_from_ptr(ptr)? };
         let remaining = unsafe { self.count_from_cursor(cursor) };
@@ -506,23 +642,38 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 // ── Insert ──
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
-    /// Insert an element. Returns a stable raw pointer to it.
+    /// Inserts an element and returns a stable raw pointer to it.
+    ///
+    /// The pointer remains valid until the element is erased via
+    /// [`erase`](Hive::erase), [`retain`](Hive::retain), or a consuming
+    /// operation. Other insertions and erasures never move this element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// let p = hive.insert(42);
+    /// unsafe { assert_eq!(*p, 42); }
+    /// ```
     pub fn insert(&mut self, value: T) -> *const T {
         self.insert_raw(value)
     }
 
-    /// Insert an element and return a mutable raw pointer.
+    /// Inserts an element and returns a stable mutable raw pointer to it.
+    ///
+    /// See [`insert`](Hive::insert).
     pub fn insert_mut(&mut self, value: T) -> *mut T {
         self.insert_raw_mut(value)
     }
 
     /// Constructs an element from a closure and inserts it.
     ///
-    /// This is the safe counterpart to [`Hive::insert_with_uninit`]. The closure
-    /// returns a fully initialized value, so there is no external
-    /// `MaybeUninit<T>` safety contract. The closure is evaluated before the
-    /// hive reserves a slot, which keeps the hive unchanged if the closure
-    /// panics.
+    /// This is the safe counterpart to [`insert_with_uninit`](Hive::insert_with_uninit).
+    /// The closure returns a fully initialized `T`, so there is no
+    /// `MaybeUninit<T>` safety contract. The closure is evaluated before a
+    /// hive slot is reserved — if it panics, the hive is unchanged.
     pub fn emplace<F>(&mut self, f: F) -> *const T
     where
         F: FnOnce() -> T,
@@ -533,7 +684,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Constructs an element from a closure, inserts it, and returns a mutable
     /// raw pointer.
     ///
-    /// See [`Hive::emplace`].
+    /// See [`emplace`](Hive::emplace).
     pub fn emplace_mut<F>(&mut self, f: F) -> *mut T
     where
         F: FnOnce() -> T,
@@ -541,12 +692,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.insert_mut(f())
     }
 
-    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
-    /// place before returning a stable pointer to it.
+    /// Inserts `T::default()`, then calls `f` on the initialized element before
+    /// returning a stable pointer.
     ///
-    /// Unlike [`Hive::insert_with_uninit`], this is safe because the closure
-    /// receives an initialized `&mut T`. If the closure panics, the default value
-    /// remains in the hive and will be dropped normally.
+    /// Unlike [`insert_with_uninit`](Hive::insert_with_uninit), this method is
+    /// safe: `f` receives an initialized `&mut T`. If `f` panics, the default
+    /// value remains in the hive and will be dropped when the hive is.
     pub fn insert_with<F>(&mut self, f: F) -> *const T
     where
         T: Default,
@@ -555,10 +706,10 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.insert_with_mut(f)
     }
 
-    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
-    /// place before returning a stable mutable pointer to it.
+    /// Inserts `T::default()`, then calls `f` on the initialized element before
+    /// returning a stable mutable pointer.
     ///
-    /// See [`Hive::insert_with`].
+    /// See [`insert_with`](Hive::insert_with).
     pub fn insert_with_mut<F>(&mut self, f: F) -> *mut T
     where
         T: Default,
@@ -592,11 +743,22 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 
     /// Constructs an element in-place in a hive slot.
     ///
+    /// The closure receives a `&mut MaybeUninit<T>` pointing to uninitialized
+    /// memory inside a hive slot. It must initialize the slot exactly once. The
+    /// returned pointer is stable until the element is erased.
+    ///
     /// # Safety
-    /// The closure must initialize the supplied slot exactly once. It must not
-    /// read from the slot before initialization and must not unwind after
-    /// initializing it. If the closure returns without initializing the slot,
-    /// subsequent use of the hive is undefined behavior.
+    ///
+    /// The closure must:
+    /// - Initialize the supplied `MaybeUninit<T>` exactly once (via
+    ///   `MaybeUninit::write` or equivalent).
+    /// - **Not** read from the slot before initialization.
+    /// - **Not** unwind (panic) after initializing it (doing so would leave a
+    ///   partially-initialized element in the hive, leading to a double-drop or
+    ///   use-after-free).
+    ///
+    /// If the closure panics before initializing the slot, the hive remains
+    /// internally consistent.
     pub unsafe fn insert_with_uninit<F>(&mut self, f: F) -> *const T
     where
         F: FnOnce(&mut MaybeUninit<T>),
@@ -607,7 +769,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Constructs an element in-place and returns a mutable raw pointer.
     ///
     /// # Safety
-    /// See [`Hive::insert_with_uninit`].
+    ///
+    /// See [`insert_with_uninit`](Hive::insert_with_uninit).
     pub unsafe fn insert_with_uninit_mut<F>(&mut self, f: F) -> *mut T
     where
         F: FnOnce(&mut MaybeUninit<T>),
@@ -966,21 +1129,33 @@ impl<T, A: Allocator + Clone> Drop for PendingGroupInsertion<'_, T, A> {
 // ── Erase ──
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
-    /// Erase an element by raw pointer.
+    /// Erases an element identified by the raw pointer returned from a prior
+    /// insertion.
     ///
-    /// Takes the element as a `*const T` rather than a Rust reference because
-    /// the function destroys the element and reuses the slot's bytes for the
-    /// per-group free-list. Passing `&T` or `&mut T` would have the borrow
-    /// outlive the call and is undefined behavior under Stacked/Tree Borrows
-    /// (the function-argument protector aliases memory we then overwrite via
-    /// a different provenance chain).
+    /// The element is dropped and its slot is made available for reuse by the
+    /// next insertion. The skipfield is updated so that iteration skips the
+    /// erased slot.
+    ///
+    /// The function takes `*const T` rather than `&T` or `&mut T`. This is
+    /// intentional: erasure destroys the element and overwrites slot memory for
+    /// the per-group free-list. If a Rust reference were passed, the aliasing
+    /// rules (Stacked/Tree Borrows) would consider the argument's provenance
+    /// still-active after the call, violating the model when the slot is reused
+    /// through a different provenance path.
     ///
     /// # Safety
+    ///
     /// `element_ptr` must be a valid pointer previously returned by this hive
-    /// (via `insert`, `insert_mut`, an iterator, etc.) to an element that has
-    /// not already been erased. If the caller is holding an outstanding
-    /// `&T`/`&mut T` to this element, they must drop or `mem::forget` it
-    /// before calling `erase`.
+    /// (via [`insert`](Hive::insert), [`insert_mut`](Hive::insert_mut), an
+    /// iterator, [`get`](Hive::get)/[`get_mut`](Hive::get_mut), etc.) to an
+    /// element that has not already been erased. The caller must drop or
+    /// [`core::mem::forget`] any outstanding `&T` or `&mut T` references to the
+    /// element before calling `erase`.
+    ///
+    /// # Panics (debug)
+    ///
+    /// In debug builds, panics if the hive is empty, the pointer does not
+    /// belong to any group, or the element is already erased.
     pub unsafe fn erase(&mut self, element_ptr: *const T) {
         self.erase_raw(element_ptr as *mut T);
     }
@@ -1037,6 +1212,25 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
     }
 
+    /// Removes all elements from the hive.
+    ///
+    /// All elements are dropped. Memory blocks are moved to the reserved pool
+    /// and may be reused on subsequent insertions. To release the reserved
+    /// blocks as well, call [`trim_capacity`](Hive::trim_capacity) or
+    /// [`shrink_to_fit`](Hive::shrink_to_fit) afterwards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.insert(1);
+    /// hive.insert(2);
+    /// hive.clear();
+    /// assert!(hive.is_empty());
+    /// assert_eq!(hive.len(), 0);
+    /// ```
     pub fn clear(&mut self) {
         if self.len == 0 {
             return;
@@ -1078,6 +1272,22 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.len = 0;
     }
 
+    /// Keeps only the elements for which `f` returns `true`.
+    ///
+    /// All other elements are erased. This is an O(n) operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.insert(1);
+    /// hive.insert(2);
+    /// hive.insert(3);
+    /// hive.retain(|&x| x % 2 == 0);
+    /// assert_eq!(hive.len(), 1);
+    /// ```
     pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut f: F) {
         let mut to_erase: alloc::vec::Vec<*mut T> = alloc::vec::Vec::new();
         unsafe {
@@ -1108,8 +1318,22 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Ensures capacity for at least `additional` more elements.
     ///
-    /// This intentionally follows Rust collection semantics (`Vec::reserve`),
-    /// not C++ `std::hive::reserve(n)` total-capacity semantics.
+    /// This intentionally follows Rust collection semantics (`Vec::reserve`), not
+    /// the C++ total-capacity semantics of `std::hive::reserve(n)`.
+    ///
+    /// If `additional` elements cannot fit within existing capacity, new groups
+    /// are allocated up to `max_block_capacity` per group and placed on the
+    /// reserved list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive: Hive<i32> = Hive::new();
+    /// hive.reserve(1000);
+    /// assert!(hive.capacity() >= 1000);
+    /// ```
     pub fn reserve(&mut self, additional: usize) {
         let needed = self.len.saturating_add(additional);
         if needed <= self.capacity {
@@ -1145,6 +1369,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
     }
 
+    /// Shrinks the hive to use only the minimum capacity needed for its current
+    /// elements.
+    ///
+    /// All reserved groups are deallocated. If the hive is non-empty, elements
+    /// may be compacted into new groups that match the current block capacity
+    /// limits. This is an O(n) operation.
     pub fn shrink_to_fit(&mut self) {
         if self.capacity == self.len {
             return;
@@ -1169,6 +1399,15 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.compact_to_limits(self.block_capacity_limits());
     }
 
+    /// Updates block capacity limits, compacting existing elements if
+    /// necessary.
+    ///
+    /// If the new limits exclude some existing groups, elements are moved into
+    /// new groups that satisfy the limits. Reserved groups outside the new
+    /// limits are deallocated. Element stability **is not** preserved during
+    /// compaction — all existing pointers are invalidated.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if the limits are invalid.
     pub fn reshape(
         &mut self,
         limits: BlockCapacityLimits,
@@ -1189,6 +1428,11 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         Ok(())
     }
 
+    /// Deallocates all reserved (empty) groups, reducing capacity to the
+    /// total capacity of groups currently holding live elements.
+    ///
+    /// This does not affect live elements or compact them. The hive can still
+    /// grow afterward.
     pub fn trim_capacity(&mut self) {
         unsafe {
             while let Some(group) = self.reserved_groups {
@@ -1201,6 +1445,13 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
     }
 
+    /// Deallocates reserved groups until total capacity drops to
+    /// `retain_capacity` or can no longer be reduced without affecting live
+    /// elements.
+    ///
+    /// Live element capacity is never touched. If there are enough reserved
+    /// groups, total capacity is reduced to the given target; otherwise, all
+    /// reserved groups are freed and capacity is left at the live-group total.
     pub fn trim_capacity_to(&mut self, retain_capacity: usize) {
         if self.capacity <= retain_capacity || self.len >= retain_capacity {
             return;
@@ -1236,6 +1487,19 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 }
 
 impl<T: Clone, A: Allocator + Clone> Hive<T, A> {
+    /// Clears the hive and fills it with `len` copies of `value`.
+    ///
+    /// This is an O(len) operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.assign(3, 7);
+    /// assert_eq!(hive.len(), 3);
+    /// ```
     pub fn assign(&mut self, len: usize, value: T) {
         self.clear();
         self.reserve(len);
@@ -1246,17 +1510,33 @@ impl<T: Clone, A: Allocator + Clone> Hive<T, A> {
 }
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
+    /// Clears the hive and replaces its contents with elements from an iterator.
+    ///
+    /// Equivalent to `clear()` followed by `extend(iter)`, but avoids
+    /// double-buffering.
     pub fn assign_from_iter<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.clear();
         self.extend(iter);
     }
 
+    /// Inserts all elements from an iterator without clearing existing
+    /// contents.
+    ///
+    /// Unlike [`extend`](Hive::extend), this does not pre-reserve capacity based
+    /// on the iterator's size hint. It is equivalent to repeated
+    /// [`insert`](Hive::insert) calls.
     pub fn insert_many<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for item in iter {
             self.insert_raw(item);
         }
     }
 
+    /// Moves all elements from `source` into `self`.
+    ///
+    /// This is **not** the C++ O(1) block-splicing operation. Elements are read
+    /// out of `source` and re-inserted into `self`. `source` is left empty.
+    ///
+    /// Self-splicing (passing `self` as `source`) is a no-op.
     pub fn splice(&mut self, source: &mut Self) {
         if core::ptr::eq(self, source) || source.is_empty() {
             return;
@@ -1307,12 +1587,46 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 }
 
 impl<T: PartialEq, A: Allocator + Clone> Hive<T, A> {
+    /// Removes consecutive duplicate elements (as determined by `==`).
+    ///
+    /// Returns the number of elements erased. The hive **must** be sorted (see
+    /// [`sort`](Hive::sort)) before calling `unique`, or behavior is
+    /// unspecified.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.extend([1, 1, 2, 3, 3]);
+    /// hive.sort();
+    /// let removed = hive.unique();
+    /// assert_eq!(removed, 2);
+    /// assert_eq!(hive.len(), 3);
+    /// ```
     pub fn unique(&mut self) -> usize {
         self.unique_by(|a, b| a == b)
     }
 }
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
+    /// Removes consecutive duplicates using a custom equality predicate.
+    ///
+    /// Returns the number of elements erased. Like [`unique`](Hive::unique),
+    /// this requires a sorted hive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.extend(["a", "A", "b"]);
+    /// hive.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    /// let removed = hive.unique_by(|a, b| a.eq_ignore_ascii_case(b));
+    /// assert_eq!(removed, 1);
+    /// ```
     pub fn unique_by<F>(&mut self, mut same_bucket: F) -> usize
     where
         F: FnMut(&T, &T) -> bool,
@@ -1358,6 +1672,22 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 // ── Sort ──
 
 impl<T, A: Allocator + Clone> Hive<T, A> {
+    /// Sorts the elements in place using a custom comparator.
+    ///
+    /// Element addresses are preserved — elements are not moved in memory,
+    /// only their values are rearranged. This is an O(n log n) operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Hive;
+    ///
+    /// let mut hive = Hive::new();
+    /// hive.extend([3, 1, 2]);
+    /// hive.sort_by(|a, b| a.cmp(b));
+    /// let v: Vec<_> = hive.iter().copied().collect();
+    /// assert_eq!(v, vec![1, 2, 3]);
+    /// ```
     pub fn sort_by<F: FnMut(&T, &T) -> core::cmp::Ordering>(&mut self, mut compare: F) {
         let count = self.len;
         if count <= 1 {
@@ -1400,6 +1730,9 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 }
 
 impl<T: Ord, A: Allocator + Clone> Hive<T, A> {
+    /// Sorts the elements in place using the natural ordering of `T`.
+    ///
+    /// Element addresses are preserved. See [`sort_by`](Hive::sort_by).
     pub fn sort(&mut self) {
         self.sort_by(|a, b| a.cmp(b))
     }

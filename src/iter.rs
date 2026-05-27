@@ -1,4 +1,14 @@
-//! Iterator types for `Hive`: `Iter`, `IterMut`, `IntoIter`.
+//! Iterator types for [`Hive`](crate::Hive).
+//!
+//! This module provides three iterator types:
+//!
+//! | Iterator | Produces | Obtained via |
+//! |---|---|---|
+//! | [`Iter`] | `&T` | [`Hive::iter`], `for x in &hive` |
+//! | [`IterMut`] | `&mut T` | [`Hive::iter_mut`], `for x in &mut hive` |
+//! | [`IntoIter`] | `T` | `for x in hive` (consuming) |
+//!
+//! All three are double-ended, exact-size, and fused.
 
 use crate::allocator::Allocator;
 use crate::group::Group;
@@ -35,6 +45,13 @@ macro_rules! iter_next_back {
     }};
 }
 
+/// A shared iterator over the elements of a [`Hive`](crate::Hive).
+///
+/// Yields `&T` in insertion order (left-to-right across blocks). Erasing during
+/// iteration is allowed and valid — it does not invalidate the iterator, but
+/// any erased element will not be visited again.
+///
+/// This iterator is double-ended, exact-size, and fused.
 pub struct Iter<'a, T: 'a, A: Allocator + 'a> {
     front: Cursor<T, A>,
     back: Cursor<T, A>,
@@ -88,6 +105,12 @@ impl<'a, T, A: Allocator> DoubleEndedIterator for Iter<'a, T, A> {
 impl<'a, T, A: Allocator> ExactSizeIterator for Iter<'a, T, A> {}
 impl<'a, T, A: Allocator> FusedIterator for Iter<'a, T, A> {}
 
+/// A mutable iterator over the elements of a [`Hive`](crate::Hive).
+///
+/// Yields `&mut T` in insertion order. Because each element is yielded at most
+/// once, mutable iteration is sound even in the presence of erased-slot reuse.
+///
+/// This iterator is double-ended, exact-size, and fused.
 pub struct IterMut<'a, T: 'a, A: Allocator + 'a> {
     front: Cursor<T, A>,
     back: Cursor<T, A>,
@@ -141,6 +164,13 @@ impl<'a, T, A: Allocator> DoubleEndedIterator for IterMut<'a, T, A> {
 impl<'a, T, A: Allocator> ExactSizeIterator for IterMut<'a, T, A> {}
 impl<'a, T, A: Allocator> FusedIterator for IterMut<'a, T, A> {}
 
+/// A consuming iterator over the elements of a [`Hive`](crate::Hive).
+///
+/// Yields `T` by value in insertion order, consuming the hive. Elements that
+/// have not been exhausted when the iterator is dropped are still dropped
+/// normally, and all group allocations are freed.
+///
+/// This iterator is double-ended, exact-size, and fused.
 pub struct IntoIter<T, A: Allocator> {
     front: Cursor<T, A>,
     back: Cursor<T, A>,
