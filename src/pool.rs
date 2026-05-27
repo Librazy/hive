@@ -198,6 +198,30 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         value
     }
 
+    /// Pin-initializes an element in-place in the pool and returns a
+    /// [`Pooled`] guard.
+    ///
+    /// The initializer receives a pinned, uninitialized slot through
+    /// [`pin_init::PinUninit`]. The element is considered inserted only if the
+    /// initializer succeeds; on error, the pool remains unchanged apart from any
+    /// allocation that may be retained for later reuse.
+    ///
+    /// Requires the `pin-init` feature.
+    #[cfg(feature = "pin-init")]
+    pub fn insert_pin_init<I, E>(&self, init: I) -> Result<Pooled<'_, T, A>, E>
+    where
+        I: pin_init::Init<T, E>,
+    {
+        let ptr = unsafe { (&mut *self.hive.get()).insert_pin_init_mut(init)? };
+        let ptr = NonNull::new(ptr).expect("Hive::insert_pin_init_mut returned null");
+
+        Ok(Pooled {
+            pool: self,
+            ptr,
+            _not_send_sync: PhantomData,
+        })
+    }
+
     /// Returns the number of live objects in the pool.
     pub fn len(&self) -> usize {
         // SAFETY: reading metadata does not create references to elements.
@@ -408,6 +432,30 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         let mut value = self.insert(T::default());
         f(&mut value);
         value
+    }
+
+    /// Pin-initializes an element in-place in the pool and returns a
+    /// [`SyncPooled`] guard.
+    ///
+    /// The initializer receives a pinned, uninitialized slot through
+    /// [`pin_init::PinUninit`]. The element is considered inserted only if the
+    /// initializer succeeds; on error, the pool remains unchanged apart from any
+    /// allocation that may be retained for later reuse.
+    ///
+    /// Requires the `pin-init` feature.
+    #[cfg(feature = "pin-init")]
+    pub fn insert_pin_init<I, E>(&self, init: I) -> Result<SyncPooled<T, A>, E>
+    where
+        I: pin_init::Init<T, E>,
+    {
+        let ptr = self.hive.lock().unwrap().insert_pin_init_mut(init)?;
+        let ptr = NonNull::new(ptr).expect("Hive::insert_pin_init_mut returned null");
+
+        Ok(SyncPooled {
+            hive: self.hive.clone(),
+            ptr,
+            _owns_element: PhantomData,
+        })
     }
 
     /// Returns the number of live objects in the pool.

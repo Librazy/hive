@@ -1188,6 +1188,55 @@ fn test_pool_reuses_erased_slot() {
     assert_eq!(pool.len(), 1);
 }
 
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_pool_insert_pin_init() {
+    let pool = Pool::new();
+    let guard = pool.insert_pin_init(NeedPin::new(7)).unwrap();
+
+    assert_eq!(pool.len(), 1);
+    unsafe {
+        Pin::new_unchecked(&*guard).verify();
+        assert_eq!((*(&*guard as *const NeedPin)).value, 7);
+    }
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_pool_insert_pin_init_error_leaves_pool_unchanged() {
+    let pool = Pool::new();
+    let _first = pool.insert(1);
+
+    let result = pool.insert_pin_init(init_from_closure(
+        |this: PinUninit<'_, i32>| -> InitResult<'_, i32, &'static str> {
+            Err(this.init_err("failed"))
+        },
+    ));
+
+    match result {
+        Err(e) => assert_eq!(e, "failed"),
+        Ok(_) => panic!("expected error"),
+    }
+    assert_eq!(pool.len(), 1);
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_pool_insert_pin_init_reuses_erased_slot() {
+    let pool = Pool::new();
+    let _first = pool.insert(1);
+    let erased = pool.insert(2);
+    let erased_addr = (&*erased) as *const i32 as usize;
+    let _third = pool.insert(3);
+    drop(erased);
+
+    let _guard = pool.insert_pin_init::<_, Infallible>(4).unwrap();
+    let reused_addr = (&*_guard) as *const i32 as usize;
+
+    assert_eq!(erased_addr, reused_addr);
+    assert_eq!(pool.len(), 3);
+}
+
 #[test]
 fn test_pool_new_in_uses_allocator() {
     let pool = Pool::<i32, Global>::new_in(Global);
@@ -1353,6 +1402,58 @@ fn test_sync_pool_allocator_constructors() {
     assert_eq!(*value, 5);
 
     assert!(SyncPool::<i32, Global>::try_new_in(Global, BlockCapacityLimits::new(2, 16)).is_err());
+}
+
+#[cfg(feature = "pin-init")]
+#[cfg(feature = "std")]
+#[test]
+fn test_sync_pool_insert_pin_init() {
+    let pool = SyncPool::new();
+    let guard = pool.insert_pin_init(NeedPin::new(7)).unwrap();
+
+    assert_eq!(pool.len(), 1);
+    unsafe {
+        Pin::new_unchecked(&*guard).verify();
+        assert_eq!((*(&*guard as *const NeedPin)).value, 7);
+    }
+}
+
+#[cfg(feature = "pin-init")]
+#[cfg(feature = "std")]
+#[test]
+fn test_sync_pool_insert_pin_init_error_leaves_pool_unchanged() {
+    let pool = SyncPool::new();
+    let _first = pool.insert(1);
+
+    let result = pool.insert_pin_init(init_from_closure(
+        |this: PinUninit<'_, i32>| -> InitResult<'_, i32, &'static str> {
+            Err(this.init_err("failed"))
+        },
+    ));
+
+    match result {
+        Err(e) => assert_eq!(e, "failed"),
+        Ok(_) => panic!("expected error"),
+    }
+    assert_eq!(pool.len(), 1);
+}
+
+#[cfg(feature = "pin-init")]
+#[cfg(feature = "std")]
+#[test]
+fn test_sync_pool_insert_pin_init_reuses_erased_slot() {
+    let pool = SyncPool::new();
+    let _first = pool.insert(1);
+    let erased = pool.insert(2);
+    let erased_addr = (&*erased) as *const i32 as usize;
+    let _third = pool.insert(3);
+    drop(erased);
+
+    let _guard = pool.insert_pin_init::<_, Infallible>(4).unwrap();
+    let reused_addr = (&*_guard) as *const i32 as usize;
+
+    assert_eq!(erased_addr, reused_addr);
+    assert_eq!(pool.len(), 3);
 }
 
 #[derive(Clone)]
