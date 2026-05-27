@@ -15,6 +15,8 @@ use std::ptr;
 const MIXED_N: usize = 65536;
 #[cfg(target_os = "linux")]
 const INSERT_PATH_N: usize = 131072;
+#[cfg(target_os = "linux")]
+const LARGE_N: usize = 1048576;
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]
@@ -176,6 +178,21 @@ fn hive_mixed_stable_reference() -> Hive<usize> {
     black_box(h)
 }
 
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+fn hive_raw_pointer_access() -> u64 {
+    let mut hive = Hive::with_capacity(LARGE_N);
+    let ptrs: Vec<*const u64> = (0..LARGE_N as u64).map(|i| hive.insert(i)).collect();
+
+    let mut sum = 0u64;
+    for &p in &ptrs {
+        sum = sum.wrapping_add(unsafe { *p });
+    }
+
+    black_box(&hive);
+    black_box(sum)
+}
+
 #[cfg(all(target_os = "linux", feature = "pin-init"))]
 library_benchmark_group!(
     name = hive_comparison,
@@ -187,7 +204,8 @@ library_benchmark_group!(
         hive_insert_with,
         hive_insert_with_reuse_erased,
         hive_erase_insert,
-        hive_mixed_stable_reference
+        hive_mixed_stable_reference,
+        hive_raw_pointer_access
     ]
 );
 
@@ -200,7 +218,8 @@ library_benchmark_group!(
         hive_insert_with,
         hive_insert_with_reuse_erased,
         hive_erase_insert,
-        hive_mixed_stable_reference
+        hive_mixed_stable_reference,
+        hive_raw_pointer_access
     ]
 );
 

@@ -24,6 +24,7 @@
 //! is the primary motivation for `Hive` over `Vec` and `VecDeque`.
 
 use crate::allocator::{Allocator, Global};
+use core::cell::Cell;
 use core::marker::PhantomData;
 use core::mem::{needs_drop, ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
@@ -36,7 +37,6 @@ use crate::group::Group;
 use crate::iter::{IntoIter, Iter, IterMut};
 use crate::skipfield::Cursor;
 
-const DEFAULT_MIN_BLOCK_CAPACITY: u16 = 8;
 const DEFAULT_MAX_BLOCK_CAPACITY: u16 = 8192;
 const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
 
@@ -45,8 +45,8 @@ const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
 /// Every group allocated by a [`Hive`] will have a capacity between `min` and
 /// `max` (inclusive). The limits affect memory usage and allocation granularity.
 ///
-/// Default limits are 8–8192. The hard lower bound is 3, and the upper bound is
-/// `u16::MAX - 1`.
+/// Default limits are type-dependent. The hard lower bound is 3, and the upper
+/// bound is determined by the skipfield index width for `T`.
 ///
 /// Pass custom limits to [`Hive::try_new`] or [`Hive::try_new_in`].
 ///
@@ -55,8 +55,8 @@ const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
 /// ```
 /// use hive::{BlockCapacityLimits, Hive};
 ///
-/// let mut hive: Hive<i32> = Hive::try_new(BlockCapacityLimits::new(4, 256)).unwrap();
-/// assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(4, 256));
+/// let mut hive: Hive<i32> = Hive::try_new(BlockCapacityLimits::new(4, 255)).unwrap();
+/// assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(4, 255));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockCapacityLimits {
@@ -68,8 +68,8 @@ pub struct BlockCapacityLimits {
 
 /// Error returned when block capacity limits are invalid.
 ///
-/// Limits must satisfy `hard_min ≤ min ≤ max ≤ hard_max` where
-/// `hard_min = 3` and `hard_max = u16::MAX - 1`.
+/// Limits must satisfy `hard_min <= min <= max <= hard_max` where
+/// `hard_min = 3` and `hard_max` is type-dependent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidBlockCapacityLimits;
 
@@ -120,6 +120,7 @@ pub struct Hive<T, A: Allocator = Global> {
     end: Cursor<T, A>,
     erasure_groups_head: Option<NonNull<Group<T, A>>>,
     reserved_groups: Option<NonNull<Group<T, A>>>,
+    lookup_hint: Cell<Option<NonNull<Group<T, A>>>>,
     len: usize,
     capacity: usize,
     min_block_capacity: u16,
@@ -146,7 +147,7 @@ fn null_cursor<T, A: Allocator>() -> Cursor<T, A> {
 fn make_cursor<T, A: Allocator>(
     group: NonNull<Group<T, A>>,
     element: *const u8,
-    skipfield: *const u16,
+    skipfield: *const u8,
 ) -> Cursor<T, A> {
     Cursor {
         group: Some(group),
@@ -167,7 +168,7 @@ impl<T, A: Allocator> Hive<T, A> {
         make_cursor(
             group,
             g.elements_base().add(constructed as usize * g.slot_size),
-            g.skipfield_ptr().add(constructed as usize),
+            g.skipfield_ptr_at(constructed as usize),
         )
     }
 }
@@ -177,7 +178,7 @@ impl<T, A: Allocator> Hive<T, A> {
 impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Creates an empty hive using the given allocator.
     ///
-    /// Default block capacity limits (8–8192) are used. To customize limits,
+    /// Default block capacity limits are used. To customize limits,
     /// use [`try_new_in`](Hive::try_new_in).
     pub fn new_in(allocator: A) -> Self {
         Self {
@@ -187,10 +188,11 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             end: null_cursor(),
             erasure_groups_head: None,
             reserved_groups: None,
+            lookup_hint: Cell::new(None),
             len: 0,
             capacity: 0,
-            min_block_capacity: DEFAULT_MIN_BLOCK_CAPACITY,
-            max_block_capacity: DEFAULT_MAX_BLOCK_CAPACITY,
+            min_block_capacity: Self::default_min_block_capacity(),
+            max_block_capacity: Self::default_max_block_capacity(),
             allocator,
         }
     }
@@ -214,7 +216,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 
 impl<T> Hive<T, Global> {
     /// Creates an empty hive with the global allocator and default block
-    /// capacity limits (8–8192).
+    /// capacity limits.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
@@ -272,17 +274,37 @@ impl<T, A: Allocator> Hive<T, A> {
         BlockCapacityLimits::new(self.min_block_capacity, self.max_block_capacity)
     }
 
-    /// Returns the default block capacity limits (8–8192).
-    pub const fn block_capacity_default_limits() -> BlockCapacityLimits {
-        BlockCapacityLimits::new(DEFAULT_MIN_BLOCK_CAPACITY, DEFAULT_MAX_BLOCK_CAPACITY)
+    /// Returns the default block capacity limits.
+    pub fn block_capacity_default_limits() -> BlockCapacityLimits {
+        BlockCapacityLimits::new(
+            Self::default_min_block_capacity(),
+            Self::default_max_block_capacity(),
+        )
     }
 
     /// Returns the hard bounds for block capacity limits.
     ///
-    /// Minimum is 3 (required for the skipfield algorithm). Maximum is
-    /// `u16::MAX - 1`.
-    pub const fn block_capacity_hard_limits() -> BlockCapacityLimits {
-        BlockCapacityLimits::new(HARD_MIN_BLOCK_CAPACITY, u16::MAX - 1)
+    /// Minimum is 3 (required for the skipfield algorithm). Maximum depends on
+    /// the skipfield index width selected for `T`.
+    pub fn block_capacity_hard_limits() -> BlockCapacityLimits {
+        BlockCapacityLimits::new(HARD_MIN_BLOCK_CAPACITY, Self::hard_max_block_capacity())
+    }
+
+    fn hard_max_block_capacity() -> u16 {
+        Group::<T, A>::none_index()
+    }
+
+    fn default_max_block_capacity() -> u16 {
+        DEFAULT_MAX_BLOCK_CAPACITY.min(Self::hard_max_block_capacity())
+    }
+
+    fn default_min_block_capacity() -> u16 {
+        let slot_size = Group::<T, A>::compute_slot_size().max(1);
+        let adaptive =
+            ((core::mem::size_of::<Self>() + core::mem::size_of::<Group<T, A>>()) * 2) / slot_size;
+        adaptive
+            .max(8)
+            .min(Self::default_max_block_capacity() as usize) as u16
     }
 
     /// Returns a reference to the allocator.
@@ -302,19 +324,57 @@ impl<T, A: Allocator> Hive<T, A> {
     }
 
     unsafe fn find_group_for(&self, element: *const u8) -> Option<NonNull<Group<T, A>>> {
-        let mut g = self.head;
-        while let Some(group) = g {
+        if let Some(group) = self.lookup_hint.get() {
             let gp = group.as_ptr();
             let base = (*gp).elements_base();
             let end = base.add((*gp).capacity as usize * (*gp).slot_size);
             if element >= base && element < end {
                 return Some(group);
             }
+
+            let mut forward = (*gp).next;
+            while let Some(group) = forward {
+                let gp = group.as_ptr();
+                let base = (*gp).elements_base();
+                let end = base.add((*gp).capacity as usize * (*gp).slot_size);
+                if element >= base && element < end {
+                    self.lookup_hint.set(Some(group));
+                    return Some(group);
+                }
+                forward = (*gp).next;
+            }
+
+            let mut backward = (*gp).prev;
+            while let Some(group) = backward {
+                let gp = group.as_ptr();
+                let base = (*gp).elements_base();
+                let end = base.add((*gp).capacity as usize * (*gp).slot_size);
+                if element >= base && element < end {
+                    self.lookup_hint.set(Some(group));
+                    return Some(group);
+                }
+                backward = (*gp).prev;
+            }
+        }
+
+        let mut g = self.head;
+        while let Some(group) = g {
+            if self.lookup_hint.get() == Some(group) {
+                g = (*group.as_ptr()).next;
+                continue;
+            }
+
+            let gp = group.as_ptr();
+            let base = (*gp).elements_base();
+            let end = base.add((*gp).capacity as usize * (*gp).slot_size);
+            if element >= base && element < end {
+                self.lookup_hint.set(Some(group));
+                return Some(group);
+            }
             g = (*gp).next;
         }
         None
     }
-
     unsafe fn cursor_from_ptr(&self, ptr: *const T) -> Option<Cursor<T, A>> {
         let byte_ptr = ptr as *const u8;
         let group = self.find_group_for(byte_ptr)?;
@@ -326,14 +386,14 @@ impl<T, A: Allocator> Hive<T, A> {
         }
 
         let element = (*gp).element_ptr(index) as *const u8;
-        if element != byte_ptr || *(*gp).skipfield_ptr().add(index as usize) != 0 {
+        if element != byte_ptr || (*gp).skipfield_at(index as usize) != 0 {
             return None;
         }
 
         Some(make_cursor(
             group,
             element,
-            (*gp).skipfield_ptr().add(index as usize),
+            (*gp).skipfield_ptr_at(index as usize),
         ))
     }
 
@@ -534,6 +594,9 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     }
 
     unsafe fn move_to_reserved_list(&mut self, group: NonNull<Group<T, A>>) {
+        if self.lookup_hint.get() == Some(group) {
+            self.lookup_hint.set(None);
+        }
         let gp = group.as_ptr();
         let prev = (*gp).prev;
         let next = (*gp).next;
@@ -556,7 +619,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
         (*gp).next = self.reserved_groups;
         (*gp).prev = None;
-        (*gp).free_list_head = u16::MAX;
+        (*gp).free_list_head = Group::<T, A>::none_index();
         self.reserved_groups = Some(group);
     }
 
@@ -575,6 +638,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     }
 
     fn deallocate_reserved_outside_limits(&mut self, limits: BlockCapacityLimits) {
+        self.lookup_hint.set(None);
         let mut current = self.reserved_groups;
         let mut previous: Option<NonNull<Group<T, A>>> = None;
 
@@ -895,7 +959,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let ptr = elem_byte as *mut T;
         ptr.write(T::default());
         end_cursor.element = elem_byte.add((*gp).slot_size);
-        end_cursor.skipfield = end_cursor.skipfield.add(1);
+        end_cursor.skipfield = end_cursor.skipfield.add(Group::<T, A>::index_size());
         self.end = end_cursor;
         (*gp).active_count += 1;
         self.len += 1;
@@ -909,13 +973,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let gp = erasure_group.as_ptr();
         let slot_size = (*gp).slot_size;
         let elements_base = (*gp).elements_base();
-        let skipfield_base = (*gp).skipfield_ptr();
         let index = (*gp).free_list_head;
-        debug_assert_ne!(index, u16::MAX);
+        debug_assert_ne!(index, Group::<T, A>::none_index());
         let next_free = free_list::head_next::<T, A>(erasure_group);
         let new_elem_byte = elements_base.add(index as usize * slot_size);
         let ptr = new_elem_byte as *mut T;
-        let new_sf = skipfield_base.add(index as usize);
+        let new_sf = (*gp).skipfield_ptr_at(index as usize);
 
         let begin = self.begin;
         let update_begin = begin
@@ -963,10 +1026,14 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             (*gp).prev = prev;
             (*gp).erasures_next = None;
             (*gp).erasures_prev = None;
-            (*gp).free_list_head = u16::MAX;
+            (*gp).free_list_head = Group::<T, A>::none_index();
             (*gp).active_count = 0;
             (*gp).group_number = gn;
-            core::ptr::write_bytes((*gp).skipfield_mut(), 0, (*gp).capacity as usize);
+            core::ptr::write_bytes(
+                (*gp).skipfield_mut(),
+                0,
+                (*gp).capacity as usize * Group::<T, A>::index_size(),
+            );
             PendingGroup::Reserved {
                 group,
                 capacity_counted: self.head.is_some() || self.len == 0,
@@ -1024,7 +1091,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let ptr = elem_byte as *mut T;
         f(&mut *(ptr as *mut MaybeUninit<T>));
         end_cursor.element = elem_byte.add((*gp).slot_size);
-        end_cursor.skipfield = end_cursor.skipfield.add(1);
+        end_cursor.skipfield = end_cursor.skipfield.add(Group::<T, A>::index_size());
         self.end = end_cursor;
         (*gp).active_count += 1;
         self.len += 1;
@@ -1044,7 +1111,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
 
         Self::pin_init_slot(ptr, init)?;
         end_cursor.element = elem_byte.add((*gp).slot_size);
-        end_cursor.skipfield = end_cursor.skipfield.add(1);
+        end_cursor.skipfield = end_cursor.skipfield.add(Group::<T, A>::index_size());
         self.end = end_cursor;
         (*gp).active_count += 1;
         self.len += 1;
@@ -1065,13 +1132,11 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let gp = erasure_group.as_ptr();
         let slot_size = (*gp).slot_size;
         let elements_base = (*gp).elements_base();
-        let skipfield_base = (*gp).skipfield_ptr();
-
         let index = (*gp).free_list_head;
-        debug_assert_ne!(index, u16::MAX);
+        debug_assert_ne!(index, Group::<T, A>::none_index());
         let new_elem_byte = elements_base.add(index as usize * slot_size);
         let ptr = new_elem_byte as *mut T;
-        let new_sf = skipfield_base.add(index as usize);
+        let new_sf = (*gp).skipfield_ptr_at(index as usize);
 
         let begin = self.begin;
         let update_begin = begin
@@ -1104,13 +1169,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let gp = erasure_group.as_ptr();
         let slot_size = (*gp).slot_size;
         let elements_base = (*gp).elements_base();
-        let skipfield_base = (*gp).skipfield_ptr();
         let index = (*gp).free_list_head;
-        debug_assert_ne!(index, u16::MAX);
+        debug_assert_ne!(index, Group::<T, A>::none_index());
         let next_free = free_list::head_next::<T, A>(erasure_group);
         let new_elem_byte = elements_base.add(index as usize * slot_size);
         let ptr = new_elem_byte as *mut T;
-        let new_sf = skipfield_base.add(index as usize);
+        let new_sf = (*gp).skipfield_ptr_at(index as usize);
 
         Self::pin_init_slot(ptr, init)?;
 
@@ -1267,7 +1331,7 @@ impl<T, A: Allocator + Clone> Drop for PendingGroupInsertion<'_, T, A> {
                     (*gp).prev = None;
                     (*gp).erasures_next = None;
                     (*gp).erasures_prev = None;
-                    (*gp).free_list_head = u16::MAX;
+                    (*gp).free_list_head = Group::<T, A>::none_index();
                     (*gp).active_count = 0;
                     self.hive.reserved_groups = Some(group);
                 }
@@ -1321,7 +1385,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let gp = group.as_ptr();
         let index = (*gp).index_from_element_ptr(byte_ptr);
         debug_assert_eq!(
-            *(*gp).skipfield_ptr().add(index as usize),
+            (*gp).skipfield_at(index as usize),
             0,
             "element already erased"
         );
@@ -1350,7 +1414,9 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                 } else {
                     self.begin = Self::begin_cursor_of(self.head.unwrap());
                     let mut b = self.begin;
-                    while unsafe { *b.skipfield != 0 } && self.len > 0 {
+                    while unsafe { (*b.group.unwrap().as_ptr()).read_index_at(b.skipfield) != 0 }
+                        && self.len > 0
+                    {
                         b = b.advance_forward();
                     }
                     self.begin = b;
@@ -1400,19 +1466,20 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                 let gp = group.as_ptr();
                 let next = (*gp).next;
                 (*gp).active_count = 0;
-                (*gp).free_list_head = u16::MAX;
+                (*gp).free_list_head = Group::<T, A>::none_index();
                 (*gp).erasures_next = None;
                 (*gp).erasures_prev = None;
                 (*gp).next = self.reserved_groups;
                 (*gp).prev = None;
                 let cap = (*gp).capacity as usize;
-                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap);
+                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap * Group::<T, A>::index_size());
                 self.reserved_groups = Some(group);
                 g = next;
             }
         }
         self.head = None;
         self.tail = None;
+        self.lookup_hint.set(None);
         self.begin = null_cursor();
         self.end = null_cursor();
         self.erasure_groups_head = None;
@@ -1511,6 +1578,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             }
             self.head = Some(head);
             self.tail = Some(head);
+            self.lookup_hint.set(None);
             self.begin = unsafe { Self::begin_cursor_of(head) };
             self.end = unsafe { Self::end_cursor_of(head, 0) };
         }
@@ -1537,6 +1605,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                 }
                 self.head = None;
                 self.tail = None;
+                self.lookup_hint.set(None);
                 self.begin = null_cursor();
                 self.end = null_cursor();
             }
@@ -1581,6 +1650,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// This does not affect live elements or compact them. The hive can still
     /// grow afterward.
     pub fn trim_capacity(&mut self) {
+        self.lookup_hint.set(None);
         unsafe {
             while let Some(group) = self.reserved_groups {
                 let gp = group.as_ptr();
@@ -1600,6 +1670,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// groups, total capacity is reduced to the given target; otherwise, all
     /// reserved groups are freed and capacity is left at the live-group total.
     pub fn trim_capacity_to(&mut self, retain_capacity: usize) {
+        self.lookup_hint.set(None);
         if self.capacity <= retain_capacity || self.len >= retain_capacity {
             return;
         }
@@ -1723,19 +1794,20 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                 let gp = group.as_ptr();
                 let next = (*gp).next;
                 (*gp).active_count = 0;
-                (*gp).free_list_head = u16::MAX;
+                (*gp).free_list_head = Group::<T, A>::none_index();
                 (*gp).erasures_next = None;
                 (*gp).erasures_prev = None;
                 (*gp).next = self.reserved_groups;
                 (*gp).prev = None;
                 let cap = (*gp).capacity as usize;
-                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap);
+                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap * Group::<T, A>::index_size());
                 self.reserved_groups = Some(group);
                 g = next;
             }
         }
         self.head = None;
         self.tail = None;
+        self.lookup_hint.set(None);
         self.begin = null_cursor();
         self.end = null_cursor();
         self.erasure_groups_head = None;

@@ -486,17 +486,23 @@ fn test_with_capacity() {
 
 #[test]
 fn test_block_capacity_limit_apis() {
-    assert_eq!(
-        Hive::<i32>::block_capacity_default_limits(),
-        BlockCapacityLimits::new(8, 8192)
-    );
+    let defaults = Hive::<i32>::block_capacity_default_limits();
+    assert!(defaults.min >= 8);
+    assert!(defaults.min <= defaults.max);
+    assert_eq!(defaults.max, 255);
     assert_eq!(Hive::<i32>::block_capacity_hard_limits().min, 3);
+    assert_eq!(Hive::<i32>::block_capacity_hard_limits().max, 255);
 
     let h = Hive::<i32>::try_new(BlockCapacityLimits::new(4, 16)).unwrap();
     assert_eq!(h.block_capacity_limits(), BlockCapacityLimits::new(4, 16));
 
     assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(2, 16)).is_err());
     assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(16, 4)).is_err());
+    assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(4, 256)).is_err());
+
+    assert_eq!(Hive::<[u8; 16]>::block_capacity_hard_limits().max, u16::MAX);
+    assert_eq!(Hive::<[u8; 16]>::block_capacity_default_limits().max, 8192);
+    assert!(Hive::<[u8; 16]>::try_new(BlockCapacityLimits::new(4, 8192)).is_ok());
 }
 
 #[test]
@@ -849,6 +855,24 @@ fn test_small_type_u8() {
     let mut vals: Vec<u8> = h.iter().copied().collect();
     vals.sort();
     assert_eq!(vals, (0u8..100).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_small_type_reuse_near_u8_capacity_limit() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(255, 255)).unwrap();
+    let refs: Vec<*const u8> = (0..255).map(|i| h.insert(i as u8)).collect();
+
+    for idx in 100..255 {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let reused: Vec<*const u8> = (0..155).map(|i| h.insert(i as u8)).collect();
+
+    assert_eq!(reused.first().copied(), Some(refs[100]));
+    assert_eq!(reused.last().copied(), Some(refs[254]));
+    assert_eq!(h.len(), 255);
 }
 
 #[test]
