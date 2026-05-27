@@ -1,6 +1,7 @@
 zlib License
 
-(C) 2021 Matthew Bentley
+(C) 2026 Liqueur Librazy
+(C) 2021 Matthew Bentley — original C++ implementation
 
 This software is provided 'as-is', without any express or implied
 warranty.  In no event will the authors be held liable for any damages

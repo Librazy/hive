@@ -1,32 +1,19 @@
 # hive
 
-A Rust port of `plf::hive`, the bucket-based unordered container proposed for C++ as `std::hive` in [P0447](https://wg21.link/p0447).
+[![License](https://img.shields.io/badge/license-Zlib-blue.svg)](LICENSE.md)
 
-`Hive<T>` stores elements in multiple blocks and tracks erased slots with a skipfield. Insertions reuse erased slots, so element addresses remain stable across insertions and across erasure of other elements. This makes it useful for object pools, entity lists, particle systems, and other workloads that need stable references plus frequent insertion and erasure.
+A Rust port of [`plf::hive`](https://github.com/mattreecebentley/plf_hive), the bucket-based unordered container proposed as `std::hive` in [P0447](https://wg21.link/p0447).
 
-## Status
+`Hive<T>` stores elements across multiple memory blocks and tracks erased slots via a skipfield. Insertions reuse erased slots, so element addresses remain stable across insertions and across erasure of other elements — making it well-suited for object pools, entity-component systems, particle systems, and workloads that need stable references with frequent insertion and erasure.
 
-This crate is experimental and currently requires nightly Rust because it uses `allocator_api`.
+**Requires nightly Rust** (`allocator_api`).
 
-Implemented highlights:
-- Stable raw pointers from `insert(&mut self)` and `insert_mut(&mut self)`.
-- Erasure by raw pointer (`erase(&mut self, *const T)`); pass `*const T` rather than `&T`/`&mut T` to avoid Stacked/Tree Borrows protector violations in the destroy-and-reuse step.
-- Unsafe in-place construction helpers using `MaybeUninit`.
-- Bidirectional iteration with `iter`, `iter_mut`, and `IntoIterator`.
-- Erased-slot reuse with O(1)-style insertion/erasure behavior.
-- `retain`, `clear`, `sort`, `sort_by`, `unique`, `unique_by`.
-- `reserve`, `trim_capacity`, `trim_capacity_to`, `shrink_to_fit`.
-- Block capacity limits and `reshape`.
-- Unsafe pointer lookup helpers: `get`, `get_mut`, `iter_from`, `iter_mut_from`.
-- Bulk helpers: `insert_many`, `assign`, `assign_from_iter`, `Extend`, `FromIterator`.
+## Getting Started
 
-Not a perfect C++ API mirror:
-- `reserve(additional)` follows Rust collection semantics, not C++ total-capacity semantics.
-- `splice` moves source elements into the destination instead of linking blocks in O(1).
-- There is no public C++-style iterator handle with ordering comparisons.
-- Range erase by iterator pair and optimized `advance`/`distance` equivalents are not currently exposed.
-
-## Example
+```toml
+[dependencies]
+hive = "0.1"
+```
 
 ```rust
 use hive::Hive;
@@ -41,83 +28,65 @@ for i in 0..1_000 {
     hive.insert(i);
 }
 
+// stable raw pointers
 unsafe {
     assert_eq!(*a, 10);
     assert_eq!(*b, 20);
     assert_eq!(*c, 30);
 }
 
-unsafe {
-    hive.erase(b);
-}
-
+// erasure by raw pointer reuses the slot
+unsafe { hive.erase(b); }
 let reused = hive.insert(40);
 assert_eq!(reused, b);
 ```
 
-## In-Place Construction
+See the [examples](./examples/) directory for more complete usage, including an object pool and a safe wrapper API.
 
-For emplace-like use cases, `Hive` exposes unsafe `MaybeUninit` APIs:
+## Features
 
-```rust
-use hive::Hive;
+- **Stable addresses** — pointers returned by `insert` and `insert_mut` remain valid until the element is erased.
+- **O(1) amortized insertion and erasure** — erased slots are immediately reused.
+- **Bidirectional iteration** — `iter`, `iter_mut`, and `IntoIterator`.
+- **In-place construction** — `insert_with_uninit` and `insert_with_uninit_raw` using `MaybeUninit`.
+- **Erased-slot reuse** — pointers to erased elements become pointers to newly inserted elements.
+- **Bulk operations** — `insert_many`, `assign`, `assign_from_iter`, `Extend`, `FromIterator`.
+- **Retain and deduplicate** — `retain`, `sort`, `sort_by`, `unique`, `unique_by`.
+- **Capacity management** — `reserve`, `trim_capacity`, `trim_capacity_to`, `shrink_to_fit`.
+- **Block limits** — configure minimum and maximum block sizes via `BlockCapacityLimits`; reshape at runtime.
+- **Unsafe pointer helpers** — `get`, `get_mut`, `iter_from`, `iter_mut_from` for navigating from a raw pointer.
+- **`no_std` compatible** — with `default-features = false`.
 
-let mut hive = Hive::new();
+## Crate Features
 
-let ptr = unsafe {
-    hive.insert_with_uninit(|slot| {
-        slot.write(String::from("constructed in place"));
-    })
-};
+| Feature | Default | Description |
+|---|---|---|
+| `std` | Yes | Enables `std` support (disabling gives `no_std` + `alloc`) |
+| `allocator_api` | No | Unlocks custom allocator support (nightly-only) |
 
-unsafe {
-    assert_eq!(&*ptr, "constructed in place");
-}
-```
+## Differences from the C++ API
 
-The closure must initialize the slot exactly once, must not read before initialization, and must not unwind after initialization.
-
-## Capacity Limits
-
-```rust
-use hive::{BlockCapacityLimits, Hive};
-
-let mut hive = Hive::<i32>::try_new(BlockCapacityLimits::new(8, 256)).unwrap();
-assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(8, 256));
-
-hive.reshape(BlockCapacityLimits::new(16, 512)).unwrap();
-```
+- `reserve(additional)` follows Rust collection semantics (additional capacity), not C++ total-capacity semantics.
+- `splice` moves source elements into the destination rather than O(1) block relinking.
+- No public C++-style iterator handle with ordering comparisons.
+- Range erasure by iterator pair and optimized `advance`/`distance` equivalents are not currently exposed.
 
 ## Benchmarks
-
-Benchmarks use Criterion:
 
 ```sh
 cargo bench --bench comparison
 ```
 
-Criterion writes reports and raw data under `target/criterion/`.
-
-Recent local results on this workspace:
-
-| Workload | Hive | Vec | VecDeque | LinkedList |
-|---|---:|---:|---:|---:|
-| Append 100k | 1.30 ms | 92 us | 156 us | 2.61 ms |
-| Iterate/sum 100k | 1.42 ms | 17 us | 16 us | 133 us |
-| Erase/reinsert every 10th, 100k | 1.45 ms | 70.1 ms | n/a | 2.62 ms |
-| Mixed stable-reference, 2k | 40.3 us | 96.6 us | n/a | n/a |
-| Pointer/index access 100k | 41.4 us | 17.1 us | n/a | n/a |
-
-The pattern is expected: `Vec`/`VecDeque` dominate dense append and iteration, while `Hive` is stronger when stable addresses and frequent erase/reinsert cycles matter.
+Benchmarks compare `Hive` against `Vec`, `VecDeque`, and `LinkedList`.
 
 ## Development
 
 ```sh
-cargo fmt
+cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
 ## License
 
-Zlib, matching the bundled reference implementation license.
+Zlib. See [LICENSE.md](LICENSE.md).

@@ -1,4 +1,28 @@
-//! A restricted safe object-pool wrapper around [`Hive`].
+//! Safe object-pool wrappers around [`Hive`].
+//!
+//! This module provides two object pool types:
+//!
+//! - [`Pool<T>`] — a single-threaded pool that hands out [`Pooled`] guards.
+//! - [`SyncPool<T>`] — a thread-safe pool that hands out [`SyncPooled`] guards
+//!   (requires the `std` feature).
+//!
+//! # Why pools?
+//!
+//! `Hive` exposes raw pointers and requires `unsafe` for erasure. The pool
+//! wrappers provide a safe subset of that API: callers insert elements and
+//! receive RAII guard types that automatically erase their element on drop.
+//! Direct references (`&T`/`&mut T`) are handed out safely because the guards
+//! enforce exclusive ownership and automatic cleanup.
+//!
+//! # Safety model
+//!
+//! Pools are safe because:
+//! - Only insertion and metadata (`len`, `is_empty`, `capacity`) are exposed.
+//! - Each guard uniquely owns its element. Guards are not cloneable.
+//! - Guard drops erase the element, and drop is guaranteed to run exactly once.
+//!
+//! The backing `Hive` is always accessed under the pool's internal invariants,
+//! so no raw pointer management is exposed to the caller.
 
 use crate::allocator::{Allocator, Global};
 use crate::{BlockCapacityLimits, Hive, InvalidBlockCapacityLimits};
@@ -10,19 +34,38 @@ use core::ptr::NonNull;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 
-/// A safe object pool backed by [`Hive`].
+/// A safe single-threaded object pool backed by [`Hive`].
 ///
-/// `Pool` intentionally exposes only insertion and metadata APIs. Inserted
-/// objects are represented by [`Pooled`] guards, which erase their element when
-/// dropped. The restricted API is what makes it sound to hand out direct
-/// references to elements while the pool remains available for more insertions.
+/// `Pool` restricts the `Hive` API to insertion and metadata, hiding raw
+/// pointer manipulation. Inserted objects are represented by [`Pooled`] guards,
+/// which erase their element when dropped. The restricted API is what makes it
+/// sound to hand out `&T`/`&mut T` references while the pool remains available.
+///
+/// `Pool` is `!Send` and `!Sync` because [`Pooled`] borrows the pool.
+///
+/// # Examples
+///
+/// ```
+/// use hive::Pool;
+///
+/// let pool = Pool::new();
+/// let mut guard = pool.insert(42u32);
+/// assert_eq!(*guard, 42);
+/// *guard = 99;
+/// assert_eq!(*guard, 99);
+/// drop(guard); // element erased from pool
+/// assert!(pool.is_empty());
+/// ```
 pub struct Pool<T, A: Allocator + Clone = Global> {
     hive: UnsafeCell<Hive<T, A>>,
 }
 
 /// A live object stored in a [`Pool`].
 ///
-/// Dropping this guard removes the object from its pool.
+/// Provides `Deref`/`DerefMut` access to the underlying `T`. When the guard is
+/// dropped, the element is erased from the pool.
+///
+/// `Pooled` is `!Send` and `!Sync` because it borrows the pool mutably.
 pub struct Pooled<'a, T, A: Allocator + Clone = Global> {
     pool: &'a Pool<T, A>,
     ptr: NonNull<T>,
@@ -31,11 +74,17 @@ pub struct Pooled<'a, T, A: Allocator + Clone = Global> {
 
 impl<T> Pool<T, Global> {
     /// Creates an empty pool.
+    ///
+    /// Uses the global allocator and default block capacity limits (8–8192).
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 
-    /// Creates an empty pool with space for at least `capacity` elements.
+    /// Creates an empty pool with space pre-allocated for at least `capacity`
+    /// elements.
+    ///
+    /// Equivalent to constructing a new pool and calling
+    /// [`reserve`](Hive::reserve) on the backing hive.
     pub fn with_capacity(capacity: usize) -> Self {
         let pool = Self::new();
         // SAFETY: no guards exist yet, so reserving through the backing hive
@@ -44,7 +93,9 @@ impl<T> Pool<T, Global> {
         pool
     }
 
-    /// Creates an empty pool with custom block-capacity limits.
+    /// Creates an empty pool with custom block capacity limits.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if limits are out of bounds.
     pub fn try_new(limits: BlockCapacityLimits) -> Result<Self, InvalidBlockCapacityLimits> {
         Self::try_new_in(Global, limits)
     }
@@ -68,7 +119,10 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         pool
     }
 
-    /// Creates an empty pool using `allocator` and custom block-capacity limits.
+    /// Creates an empty pool using `allocator` and custom block capacity
+    /// limits.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if limits are out of bounds.
     pub fn try_new_in(
         allocator: A,
         limits: BlockCapacityLimits,
@@ -78,7 +132,25 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         })
     }
 
-    /// Inserts `value` into the pool and returns a guard for the live object.
+    /// Inserts `value` into the pool and returns a [`Pooled`] guard that
+    /// provides `Deref`/`DerefMut` access.
+    ///
+    /// The element is automatically erased from the pool when the guard is
+    /// dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::Pool;
+    ///
+    /// let pool = Pool::new();
+    /// {
+    ///     let guard = pool.insert(42);
+    ///     assert_eq!(*guard, 42);
+    ///     assert_eq!(pool.len(), 1);
+    /// }
+    /// assert!(pool.is_empty());
+    /// ```
     pub fn insert(&self, value: T) -> Pooled<'_, T, A> {
         // SAFETY: `Pool` never exposes references into the whole `Hive`, only
         // per-element guards. `Hive` insertion does not move active elements,
@@ -93,10 +165,10 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         }
     }
 
-    /// Constructs a value from a closure and inserts it into the pool.
+    /// Constructs a value from a closure and inserts it.
     ///
-    /// The closure returns a fully initialized value, so this avoids the unsafe
-    /// `MaybeUninit<T>` contract exposed by `Hive::insert_with_uninit`.
+    /// The closure runs before pool insertion, so a panic in the closure
+    /// leaves the pool unchanged.
     pub fn emplace<F>(&self, f: F) -> Pooled<'_, T, A>
     where
         F: FnOnce() -> T,
@@ -104,11 +176,11 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         self.insert(f())
     }
 
-    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
-    /// place before returning its guard.
+    /// Inserts `T::default()`, then calls `f` on the initialized element.
     ///
     /// If `f` panics, the default value remains in the pool and will be erased
-    /// when the pool is dropped.
+    /// when the pool is dropped (or when the guard is dropped, if the guard was
+    /// successfully obtained).
     pub fn insert_with<F>(&self, f: F) -> Pooled<'_, T, A>
     where
         T: Default,
@@ -125,12 +197,14 @@ impl<T, A: Allocator + Clone> Pool<T, A> {
         unsafe { (&*self.hive.get()).len() }
     }
 
-    /// Returns true if the pool contains no live objects.
+    /// Returns `true` if the pool contains no live objects.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the total element capacity of the backing hive.
+    ///
+    /// This includes both live and reserved (empty) slots.
     pub fn capacity(&self) -> usize {
         // SAFETY: reading metadata does not create references to elements.
         unsafe { (&*self.hive.get()).capacity() }
@@ -173,9 +247,24 @@ impl<T, A: Allocator + Clone> Drop for Pooled<'_, T, A> {
 
 /// A thread-safe object pool backed by [`Hive`].
 ///
-/// `SyncPool` allows handles to be cloned and used from multiple threads. Each
-/// [`SyncPooled`] guard still provides direct access to only one element; pool
-/// metadata mutations are serialized by an internal mutex.
+/// Unlike [`Pool`], `SyncPool` wraps the hive in `Arc<Mutex<...>>`, allowing
+/// the pool handle to be cloned and shared across threads. Each [`SyncPooled`]
+/// guard provides direct access to a single live element; pool metadata
+/// mutations are serialized by the internal mutex.
+///
+/// `SyncPool` requires the `std` feature.
+///
+/// # Examples
+///
+/// ```
+/// use hive::SyncPool;
+///
+/// let pool = SyncPool::new();
+/// let mut guard = pool.insert(42u32);
+/// assert_eq!(*guard, 42);
+/// *guard = 100;
+/// drop(guard);
+/// ```
 #[cfg(feature = "std")]
 pub struct SyncPool<T, A: Allocator + Clone = Global> {
     hive: Arc<Mutex<Hive<T, A>>>,
@@ -183,8 +272,9 @@ pub struct SyncPool<T, A: Allocator + Clone = Global> {
 
 /// A live object stored in a [`SyncPool`].
 ///
-/// The guard may be sent to another thread when `T` and `A` are `Send`. Dropping
-/// it removes the object from the pool.
+/// Provides `Deref`/`DerefMut` access. Dropping the guard erases the element
+/// from the pool (acquiring the mutex to do so). The guard implements `Send`
+/// when `T` and `A` are `Send`, and `Sync` when `T` is `Sync`.
 #[cfg(feature = "std")]
 pub struct SyncPooled<T, A: Allocator + Clone = Global> {
     hive: Arc<Mutex<Hive<T, A>>>,
@@ -195,19 +285,23 @@ pub struct SyncPooled<T, A: Allocator + Clone = Global> {
 #[cfg(feature = "std")]
 impl<T> SyncPool<T, Global> {
     /// Creates an empty synchronized pool.
+    ///
+    /// Uses the global allocator and default block capacity limits.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 
-    /// Creates an empty synchronized pool with space for at least `capacity`
-    /// elements.
+    /// Creates an empty synchronized pool with space pre-allocated for at
+    /// least `capacity` elements.
     pub fn with_capacity(capacity: usize) -> Self {
         let pool = Self::new();
         pool.hive.lock().unwrap().reserve(capacity);
         pool
     }
 
-    /// Creates an empty synchronized pool with custom block-capacity limits.
+    /// Creates an empty synchronized pool with custom block capacity limits.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if limits are out of bounds.
     pub fn try_new(limits: BlockCapacityLimits) -> Result<Self, InvalidBlockCapacityLimits> {
         Self::try_new_in(Global, limits)
     }
@@ -239,8 +333,10 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         pool
     }
 
-    /// Creates an empty synchronized pool using `allocator` and custom
-    /// block-capacity limits.
+    /// Creates an empty synchronized pool using `allocator` and custom block
+    /// capacity limits.
+    ///
+    /// Returns [`InvalidBlockCapacityLimits`] if limits are out of bounds.
     pub fn try_new_in(
         allocator: A,
         limits: BlockCapacityLimits,
@@ -250,8 +346,20 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         })
     }
 
-    /// Inserts `value` and returns a guard that can move independently of the
-    /// pool handle.
+    /// Inserts `value` and returns a [`SyncPooled`] guard.
+    ///
+    /// The guard can be moved independently of the pool handle and implements
+    /// `Send`/`Sync` when the element and allocator types allow it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hive::SyncPool;
+    ///
+    /// let pool = SyncPool::new();
+    /// let guard = pool.insert("hello");
+    /// assert_eq!(*guard, "hello");
+    /// ```
     pub fn insert(&self, value: T) -> SyncPooled<T, A> {
         let ptr = self.hive.lock().unwrap().insert_mut(value);
         let ptr = NonNull::new(ptr).expect("Hive::insert_mut returned null");
@@ -263,8 +371,7 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         }
     }
 
-    /// Constructs a value from a closure and inserts it into the synchronized
-    /// pool.
+    /// Constructs a value from a closure and inserts it.
     ///
     /// The closure runs before the pool lock is acquired, so expensive
     /// construction does not block unrelated pool operations.
@@ -275,11 +382,10 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         self.insert(f())
     }
 
-    /// Inserts `T::default()`, then lets `f` mutate the initialized element in
-    /// place before returning its guard.
+    /// Inserts `T::default()`, then calls `f` on the initialized element.
     ///
     /// If `f` panics, the default value remains in the pool and will be erased
-    /// when the pool is dropped.
+    /// when the pool is dropped (or when the guard is dropped).
     pub fn insert_with<F>(&self, f: F) -> SyncPooled<T, A>
     where
         T: Default,
@@ -295,12 +401,14 @@ impl<T, A: Allocator + Clone> SyncPool<T, A> {
         self.hive.lock().unwrap().len()
     }
 
-    /// Returns true if the pool contains no live objects.
+    /// Returns `true` if the pool contains no live objects.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the total element capacity of the backing hive.
+    ///
+    /// This includes both live and reserved (empty) slots.
     pub fn capacity(&self) -> usize {
         self.hive.lock().unwrap().capacity()
     }

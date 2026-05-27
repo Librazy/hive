@@ -1,10 +1,18 @@
 //! Allocator abstraction layer.
 //!
-//! When the `allocator_api` feature is enabled, this module re-exports the
-//! nightly `core::alloc::Allocator` trait and `alloc::alloc::Global`.
+//! Hive needs to allocate memory for groups (blocks) and element storage. This
+//! module abstracts over two allocation strategies:
 //!
-//! When the feature is *disabled*, it provides a minimal polyfill so the rest
-//! of the crate compiles on stable Rust (using the global allocator only).
+//! 1. **With `allocator_api`** (nightly): re-exports [`core::alloc::Allocator`]
+//!    and [`alloc::alloc::Global`] directly, enabling custom allocators.
+//!
+//! 2. **Without `allocator_api`** (stable-compatible polyfill): provides a
+//!    minimal, unsafe `Allocator` trait and a `Global` struct that delegates to
+//!    the system allocator. This lets the rest of the crate compile without
+//!    nightly feature gates, albeit with global-allocator-only support.
+//!
+//! In both configurations, the items [`Allocator`], [`Global`], and
+//! [`AllocError`] are always available at this module's root.
 
 #[cfg(feature = "allocator_api")]
 pub use alloc::alloc::Global;
@@ -16,22 +24,34 @@ mod polyfill {
     use core::alloc::Layout;
     use core::ptr::NonNull;
 
-    /// Minimal polyfill for the nightly `Allocator` trait.
+    /// Minimal trait mirroring the nightly `core::alloc::Allocator`.
+    ///
+    /// Required methods are `allocate` (returns `NonNull<[u8]>` or
+    /// [`AllocError`]) and `deallocate`.
     ///
     /// # Safety
     ///
-    /// Implementors must uphold the same safety contracts as the nightly
-    /// `core::alloc::Allocator` trait.
+    /// Implementors must uphold the same safety contracts as
+    /// `core::alloc::Allocator`. In particular:
+    /// - `allocate` must return a valid, non-null memory block for the given
+    ///   `Layout`, or an error.
+    /// - `deallocate` must only be called with a pointer and layout returned
+    ///   by a prior `allocate` from the same allocator.
     pub unsafe trait Allocator {
+        /// Attempts to allocate a block of memory described by `layout`.
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>;
 
+        /// Deallocates a block previously allocated by this allocator.
+        ///
         /// # Safety
         ///
-        /// `ptr` must have been allocated by this allocator with the given `layout`.
+        /// `ptr` must have been allocated by this allocator with the given
+        /// `layout`, and must not be used after this call.
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
     }
 
-    /// Polyfill for `core::alloc::AllocError` (not stabilised).
+    /// The error type for failed allocations.
+    /// Mirrors `core::alloc::AllocError`, which is not yet stabilized.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AllocError;
 
@@ -41,7 +61,9 @@ mod polyfill {
         }
     }
 
-    /// Polyfill for `alloc::alloc::Global`.
+    /// The global memory allocator, mirroring `alloc::alloc::Global`.
+    ///
+    /// Delegates to [`alloc::alloc::alloc`] and [`alloc::alloc::dealloc`].
     #[derive(Debug, Clone, Copy, Default)]
     pub struct Global;
 
