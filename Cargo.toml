@@ -18,6 +18,16 @@ pin-init = { version = "0.2", default-features = false, optional = true }
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun = "0.19.0"
+
+[profile.bench]
+debug = true
+
 [[bench]]
 name = "comparison"
+harness = false
+
+[[bench]]
+name = "gungraun_comparison"
 harness = false
