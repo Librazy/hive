@@ -23,18 +23,42 @@ pub(crate) struct Group<T, A: Allocator> {
 }
 
 impl<T, A: Allocator> Group<T, A> {
+    pub(crate) const fn index_size() -> usize {
+        if size_of::<T>() > 10 || align_of::<T>() > 10 {
+            size_of::<u16>()
+        } else {
+            size_of::<u8>()
+        }
+    }
+
+    pub(crate) const fn index_align() -> usize {
+        if size_of::<T>() > 10 || align_of::<T>() > 10 {
+            align_of::<u16>()
+        } else {
+            align_of::<u8>()
+        }
+    }
+
+    pub(crate) const fn none_index() -> u16 {
+        if size_of::<T>() > 10 || align_of::<T>() > 10 {
+            u16::MAX
+        } else {
+            u8::MAX as u16
+        }
+    }
+
     pub(crate) fn compute_slot_size() -> usize {
-        let min_size = core::cmp::max(size_of::<T>(), 2 * size_of::<u16>());
+        let min_size = core::cmp::max(size_of::<T>(), 2 * Self::index_size());
         let align = Self::allocation_align();
         min_size.div_ceil(align) * align
     }
 
     pub(crate) fn allocation_align() -> usize {
-        core::cmp::max(align_of::<T>(), align_of::<u16>())
+        core::cmp::max(align_of::<T>(), Self::index_align())
     }
 
     pub(crate) fn compute_allocation_size(capacity: u16, slot_size: usize) -> usize {
-        slot_size * capacity as usize + size_of::<u16>() * (capacity as usize + 1)
+        slot_size * capacity as usize + Self::index_size() * (capacity as usize + 1)
     }
 
     pub(crate) fn allocate(
@@ -62,10 +86,13 @@ impl<T, A: Allocator> Group<T, A> {
 
         let allocation: NonNull<u8> = alloc_block.cast::<u8>();
 
-        let skipfield_base =
-            unsafe { allocation.as_ptr().add(slot_size * capacity as usize) as *mut u16 };
+        let skipfield_base = unsafe { allocation.as_ptr().add(slot_size * capacity as usize) };
         unsafe {
-            core::ptr::write_bytes(skipfield_base, 0, capacity as usize + 1);
+            core::ptr::write_bytes(
+                skipfield_base,
+                0,
+                (capacity as usize + 1) * Self::index_size(),
+            );
         }
 
         let group_number = prev.map_or(0, |p| unsafe { p.as_ref().group_number + 1 });
@@ -78,7 +105,7 @@ impl<T, A: Allocator> Group<T, A> {
             prev,
             erasures_next: None,
             erasures_prev: None,
-            free_list_head: u16::MAX,
+            free_list_head: Self::none_index(),
             capacity,
             active_count: 0,
             group_number,
@@ -119,12 +146,12 @@ impl<T, A: Allocator> Group<T, A> {
         (*gp).prev = prev;
         (*gp).erasures_next = None;
         (*gp).erasures_prev = None;
-        (*gp).free_list_head = u16::MAX;
+        (*gp).free_list_head = Self::none_index();
         (*gp).active_count = 1;
         (*gp).group_number = group_number;
         let cap = (*gp).capacity as usize;
         let sf = (*gp).skipfield_mut();
-        core::ptr::write_bytes(sf, 0, cap);
+        core::ptr::write_bytes(sf, 0, cap * Self::index_size());
     }
 
     // ── Accessors ──
@@ -141,16 +168,56 @@ impl<T, A: Allocator> Group<T, A> {
         self.elements_base().add(index as usize * self.slot_size) as *const T
     }
 
-    pub(crate) unsafe fn skipfield_mut(&self) -> *mut u16 {
+    pub(crate) unsafe fn skipfield_mut(&self) -> *mut u8 {
         self.allocation
             .as_ptr()
-            .add(self.slot_size * self.capacity as usize) as *mut u16
+            .add(self.slot_size * self.capacity as usize)
     }
 
-    pub(crate) unsafe fn skipfield_ptr(&self) -> *const u16 {
+    pub(crate) unsafe fn skipfield_ptr(&self) -> *const u8 {
         self.allocation
             .as_ptr()
-            .add(self.slot_size * self.capacity as usize) as *const u16
+            .add(self.slot_size * self.capacity as usize)
+    }
+
+    pub(crate) unsafe fn skipfield_at(&self, index: usize) -> u16 {
+        let ptr = self.skipfield_ptr().add(index * Self::index_size());
+        if Self::index_size() == 1 {
+            *ptr as u16
+        } else {
+            *(ptr as *const u16)
+        }
+    }
+
+    pub(crate) unsafe fn write_skipfield_at(&self, index: usize, value: u16) {
+        debug_assert!(value <= Self::none_index());
+        let ptr = self.skipfield_mut().add(index * Self::index_size());
+        if Self::index_size() == 1 {
+            *ptr = value as u8;
+        } else {
+            *(ptr as *mut u16) = value;
+        }
+    }
+
+    pub(crate) unsafe fn skipfield_ptr_at(&self, index: usize) -> *const u8 {
+        self.skipfield_ptr().add(index * Self::index_size())
+    }
+
+    pub(crate) unsafe fn read_index_at(&self, ptr: *const u8) -> u16 {
+        if Self::index_size() == 1 {
+            *ptr as u16
+        } else {
+            *(ptr as *const u16)
+        }
+    }
+
+    pub(crate) unsafe fn write_index_at(&self, ptr: *mut u8, value: u16) {
+        debug_assert!(value <= Self::none_index());
+        if Self::index_size() == 1 {
+            *ptr = value as u8;
+        } else {
+            *(ptr as *mut u16) = value;
+        }
     }
 
     pub(crate) fn is_full(&self) -> bool {

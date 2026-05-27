@@ -75,7 +75,7 @@ pub struct Pooled<'a, T, A: Allocator + Clone = Global> {
 impl<T> Pool<T, Global> {
     /// Creates an empty pool.
     ///
-    /// Uses the global allocator and default block capacity limits (8–8192).
+    /// Uses the global allocator and default block capacity limits.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
