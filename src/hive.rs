@@ -625,7 +625,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             return;
         };
         let gp = tail.as_ptr();
-        let end_index = (*gp).index_from_element_ptr(self.end.element as *const u8);
+        let end_index = (*gp).index_from_element_ptr(self.end.element);
         let distance = (*gp).capacity - end_index;
         if distance == 0 {
             return;

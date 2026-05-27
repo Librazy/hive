@@ -145,6 +145,61 @@ fn hive_insert_with_reuse_erased() -> Hive<NonTrivialElement> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone)]
+#[repr(transparent)]
+struct HugeElement {
+    data: [u64; 1024],
+}
+
+impl HugeElement {
+    fn new(i: usize) -> Self {
+        let mut data = [0u64; 1024];
+        for j in 0..1024 {
+            data[j] = i as u64 + j as u64;
+        }
+        Self { data }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "pin-init"))]
+fn huge_pin_init(i: usize) -> impl pin_init::Init<HugeElement, Infallible> {
+    init_from_closure(
+        move |mut this: PinUninit<'_, HugeElement>| -> InitResult<'_, HugeElement, Infallible> {
+            let ptr = this.get_mut().as_mut_ptr() as *mut u64;
+
+            unsafe {
+                for j in 0..1024 {
+                    ptr.add(j).write(i as u64 + j as u64);
+                }
+                Ok(this.init_ok())
+            }
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+fn hive_insert_huge() -> Hive<HugeElement> {
+    let mut h = Hive::with_capacity(MIXED_N);
+    for i in 0..MIXED_N {
+        let element = HugeElement::new(i);
+        h.insert(black_box(element));
+    }
+    black_box(h)
+}
+
+#[cfg(all(target_os = "linux", feature = "pin-init"))]
+#[library_benchmark]
+fn hive_insert_pin_init_huge() -> Hive<HugeElement> {
+    let mut h = Hive::with_capacity(MIXED_N);
+    for i in 0..MIXED_N {
+        h.insert_pin_init::<_, Infallible>(huge_pin_init(black_box(i)))
+            .unwrap();
+    }
+    black_box(h)
+}
+
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 fn hive_erase_insert() -> Hive<u64> {
     let mut h = Hive::with_capacity(INSERT_PATH_N);
@@ -264,7 +319,9 @@ library_benchmark_group!(
         hive_raw_pointer_access,
         hive_splice_into_empty,
         hive_splice_append,
-        hive_splice_append_with_gaps
+        hive_splice_append_with_gaps,
+        hive_insert_huge,
+        hive_insert_pin_init_huge,
     ]
 );
 
@@ -281,7 +338,8 @@ library_benchmark_group!(
         hive_raw_pointer_access,
         hive_splice_into_empty,
         hive_splice_append,
-        hive_splice_append_with_gaps
+        hive_splice_append_with_gaps,
+        hive_insert_huge,
     ]
 );
 

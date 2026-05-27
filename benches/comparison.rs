@@ -43,6 +43,22 @@ impl NonTrivialElement {
     }
 }
 
+#[derive(Clone)]
+#[repr(transparent)]
+struct HugeElement {
+    data: [u64; 1024],
+}
+
+impl HugeElement {
+    fn new(i: usize) -> Self {
+        let mut data = [0u64; 1024];
+        for j in 0..1024 {
+            data[j] = i as u64 + j as u64;
+        }
+        Self { data }
+    }
+}
+
 #[cfg(feature = "pin-init")]
 fn non_trivial_pin_init(i: usize) -> impl pin_init::Init<NonTrivialElement, Infallible> {
     init_from_closure(
@@ -54,6 +70,22 @@ fn non_trivial_pin_init(i: usize) -> impl pin_init::Init<NonTrivialElement, Infa
                 ptr::addr_of_mut!((*ptr).name).write(format!("element-{i}"));
                 ptr::addr_of_mut!((*ptr).data).write(data);
                 ptr::addr_of_mut!((*ptr).checksum).write(checksum);
+                Ok(this.init_ok())
+            }
+        },
+    )
+}
+
+#[cfg(feature = "pin-init")]
+fn huge_pin_init(i: usize) -> impl pin_init::Init<HugeElement, Infallible> {
+    init_from_closure(
+        move |mut this: PinUninit<'_, HugeElement>| -> InitResult<'_, HugeElement, Infallible> {
+            let ptr = this.get_mut().as_mut_ptr() as *mut u64;
+
+            unsafe {
+                for j in 0..1024 {
+                    ptr.add(j).write(i as u64 + j as u64);
+                }
                 Ok(this.init_ok())
             }
         },
@@ -231,6 +263,36 @@ fn bench_hive_insertion_paths(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_hive_huge_insertion_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hive_insertion_paths_huge");
+    group.bench_function(BenchmarkId::new("insert", MIXED_N), |b| {
+        b.iter_with_large_drop(|| {
+            let mut h = Hive::with_capacity(MIXED_N);
+            for i in 0..MIXED_N {
+                let element = HugeElement::new(i);
+                h.insert(black_box(element));
+            }
+            black_box(&mut h);
+            h
+        });
+    });
+
+    #[cfg(feature = "pin-init")]
+    group.bench_function(BenchmarkId::new("insert_pin_init", MIXED_N), |b| {
+        b.iter_with_large_drop(|| {
+            let mut h = Hive::with_capacity(MIXED_N);
+            for i in 0..MIXED_N {
+                h.insert_pin_init::<_, Infallible>(huge_pin_init(black_box(i)))
+                    .unwrap();
+            }
+            black_box(&mut h);
+            h
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_iteration(c: &mut Criterion) {
     let mut hive = Hive::with_capacity(LARGE_N);
     for i in 0..LARGE_N as u64 {
@@ -366,6 +428,7 @@ criterion_group! {
     config = Criterion::default().sample_size(20).measurement_time(Duration::from_secs(10));
     targets = bench_append,
         bench_hive_insertion_paths,
+        bench_hive_huge_insertion_paths,
         bench_iteration,
         bench_erase_reinsert,
         bench_mixed_stable_reference,
