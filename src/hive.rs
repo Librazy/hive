@@ -55,8 +55,8 @@ const HARD_MIN_BLOCK_CAPACITY: u16 = 3;
 /// ```
 /// use hive::{BlockCapacityLimits, Hive};
 ///
-/// let mut hive: Hive<i32> = Hive::try_new(BlockCapacityLimits::new(4, 255)).unwrap();
-/// assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(4, 255));
+/// let mut hive: Hive<i32> = Hive::try_new(BlockCapacityLimits::new(4, 8192)).unwrap();
+/// assert_eq!(hive.block_capacity_limits(), BlockCapacityLimits::new(4, 8192));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockCapacityLimits {

@@ -23,27 +23,31 @@ pub(crate) struct Group<T, A: Allocator> {
 }
 
 impl<T, A: Allocator> Group<T, A> {
+    const fn uses_compact_index() -> bool {
+        size_of::<T>() <= 2 && align_of::<T>() <= 2
+    }
+
     pub(crate) const fn index_size() -> usize {
-        if size_of::<T>() > 10 || align_of::<T>() > 10 {
-            size_of::<u16>()
-        } else {
+        if Self::uses_compact_index() {
             size_of::<u8>()
+        } else {
+            size_of::<u16>()
         }
     }
 
     pub(crate) const fn index_align() -> usize {
-        if size_of::<T>() > 10 || align_of::<T>() > 10 {
-            align_of::<u16>()
-        } else {
+        if Self::uses_compact_index() {
             align_of::<u8>()
+        } else {
+            align_of::<u16>()
         }
     }
 
     pub(crate) const fn none_index() -> u16 {
-        if size_of::<T>() > 10 || align_of::<T>() > 10 {
-            u16::MAX
-        } else {
+        if Self::uses_compact_index() {
             u8::MAX as u16
+        } else {
+            u16::MAX
         }
     }
 
