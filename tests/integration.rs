@@ -1,9 +1,22 @@
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 use hive::allocator::Global;
-use hive::{BlockCapacityLimits, Hive, Pool, SyncPool};
+#[cfg(feature = "std")]
+use hive::SyncPool;
+use hive::{BlockCapacityLimits, Hive, Pool};
 use std::cell::Cell;
+#[cfg(feature = "pin-init")]
+use std::convert::Infallible;
+#[cfg(feature = "pin-init")]
+use std::marker::PhantomPinned;
+#[cfg(feature = "pin-init")]
+use std::pin::Pin;
+#[cfg(feature = "pin-init")]
+use std::ptr;
 use std::rc::Rc;
+
+#[cfg(feature = "pin-init")]
+use pin_init::{init_from_closure, InitResult, PinUninit};
 
 #[test]
 fn test_new_empty() {
@@ -48,6 +61,96 @@ fn test_insert_with_uninit_mut() {
         *ptr += 1;
     }
     assert_eq!(h.iter().next(), Some(&42));
+}
+
+#[cfg(feature = "pin-init")]
+struct NeedPin {
+    address: *const NeedPin,
+    value: i32,
+    _pinned: PhantomPinned,
+}
+
+#[cfg(feature = "pin-init")]
+impl NeedPin {
+    fn new(value: i32) -> impl pin_init::Init<Self, Infallible> {
+        init_from_closure(
+            move |mut this: PinUninit<'_, Self>| -> InitResult<'_, Self, Infallible> {
+                let ptr = this.get_mut().as_mut_ptr();
+                unsafe {
+                    ptr::addr_of_mut!((*ptr).address).write(ptr);
+                    ptr::addr_of_mut!((*ptr).value).write(value);
+                    ptr::addr_of_mut!((*ptr)._pinned).write(PhantomPinned);
+                    Ok(this.init_ok())
+                }
+            },
+        )
+    }
+
+    fn verify(self: Pin<&Self>) {
+        assert!(ptr::eq(&*self, self.address));
+    }
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_insert_pin_init() {
+    let mut h = Hive::new();
+    let ptr = h.insert_pin_init(NeedPin::new(7)).unwrap();
+
+    assert_eq!(h.len(), 1);
+    unsafe {
+        Pin::new_unchecked(&*ptr).verify();
+        assert_eq!((*ptr).value, 7);
+    }
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_insert_pin_init_mut() {
+    let mut h = Hive::new();
+    let ptr = h.insert_pin_init_mut::<_, Infallible>(41).unwrap();
+
+    unsafe {
+        *ptr += 1;
+    }
+
+    assert_eq!(h.iter().next(), Some(&42));
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_insert_pin_init_error_leaves_hive_unchanged() {
+    let mut h = Hive::new();
+    h.insert(1);
+
+    let result = h.insert_pin_init(init_from_closure(
+        |this: PinUninit<'_, i32>| -> InitResult<'_, i32, &'static str> {
+            Err(this.init_err("failed"))
+        },
+    ));
+
+    assert_eq!(result, Err("failed"));
+    assert_eq!(h.len(), 1);
+    assert_eq!(h.iter().copied().collect::<Vec<_>>(), vec![1]);
+}
+
+#[cfg(feature = "pin-init")]
+#[test]
+fn test_insert_pin_init_reuses_erased_slot() {
+    let mut h = Hive::new();
+    h.insert(1);
+    let erased = h.insert(2);
+    h.insert(3);
+    unsafe {
+        h.erase(erased);
+    }
+
+    let inserted = h.insert_pin_init::<_, Infallible>(4).unwrap();
+
+    assert_eq!(inserted, erased);
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, vec![1, 3, 4]);
 }
 
 #[test]
@@ -1031,6 +1134,7 @@ fn test_pool_try_new_in_validates_limits() {
     assert!(Pool::<i32, Global>::try_new_in(Global, BlockCapacityLimits::new(2, 16)).is_err());
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_guard_can_move_to_thread() {
     let pool = SyncPool::new();
@@ -1051,6 +1155,7 @@ fn test_sync_pool_guard_can_move_to_thread() {
     assert!(pool.is_empty());
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_emplace_returns_mutable_guard() {
     let pool = SyncPool::new();
@@ -1068,6 +1173,7 @@ fn test_sync_pool_emplace_returns_mutable_guard() {
     assert_eq!(pool.len(), 1);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_emplace_panic_leaves_pool_unchanged() {
     let pool = SyncPool::new();
@@ -1082,6 +1188,7 @@ fn test_sync_pool_emplace_panic_leaves_pool_unchanged() {
     assert_eq!(pool.len(), 1);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_insert_with_default_initialized_slot() {
     let pool = SyncPool::new();
@@ -1093,6 +1200,7 @@ fn test_sync_pool_insert_with_default_initialized_slot() {
     assert_eq!(pool.len(), 1);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_insert_with_panic_erases_default_value() {
     let pool = SyncPool::new();
@@ -1110,6 +1218,7 @@ fn test_sync_pool_insert_with_panic_erases_default_value() {
     assert_eq!(pool.len(), 1);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_concurrent_insert_and_drop() {
     let pool = SyncPool::with_capacity(16);
@@ -1133,6 +1242,7 @@ fn test_sync_pool_concurrent_insert_and_drop() {
     assert!(pool.is_empty());
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_live_guards_across_threads() {
     let pool = SyncPool::new();
@@ -1154,6 +1264,7 @@ fn test_sync_pool_live_guards_across_threads() {
     assert_eq!(pool.len(), 2);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn test_sync_pool_allocator_constructors() {
     let pool = SyncPool::<i32, Global>::with_capacity_in(8, Global);

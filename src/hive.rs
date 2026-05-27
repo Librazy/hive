@@ -28,6 +28,9 @@ use core::marker::PhantomData;
 use core::mem::{needs_drop, ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 
+#[cfg(feature = "pin-init")]
+use pin_init::{Init, PinUninit};
+
 use crate::free_list;
 use crate::group::Group;
 use crate::iter::{IntoIter, Iter, IterMut};
@@ -778,6 +781,33 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.insert_raw_mut_with(f)
     }
 
+    /// Pin-initializes an element in-place in a hive slot.
+    ///
+    /// The initializer receives a pinned, uninitialized slot through
+    /// [`pin_init::PinUninit`]. The element is considered inserted only if the
+    /// initializer succeeds; on error, the hive remains unchanged apart from any
+    /// allocation that may be retained for later reuse.
+    ///
+    /// The returned pointer is stable until the element is erased.
+    #[cfg(feature = "pin-init")]
+    pub fn insert_pin_init<I, E>(&mut self, init: I) -> Result<*const T, E>
+    where
+        I: Init<T, E>,
+    {
+        self.insert_pin_init_mut(init).map(|ptr| ptr as *const T)
+    }
+
+    /// Pin-initializes an element in-place and returns a mutable raw pointer.
+    ///
+    /// See [`insert_pin_init`](Hive::insert_pin_init).
+    #[cfg(feature = "pin-init")]
+    pub fn insert_pin_init_mut<I, E>(&mut self, init: I) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        unsafe { self.insert_pin_init_raw_mut(init) }
+    }
+
     fn insert_raw(&mut self, value: T) -> *const T {
         self.insert_raw_mut(value)
     }
@@ -804,6 +834,36 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             }
         } else {
             self.insert_first_with(f)
+        }
+    }
+
+    #[cfg(feature = "pin-init")]
+    unsafe fn insert_pin_init_raw_mut<I, E>(&mut self, init: I) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        if let Some(eg) = self.erasure_groups_head {
+            self.insert_pin_init_reuse_erased(init, eg)
+        } else if let Some(tail) = self.tail {
+            if !(*tail.as_ptr()).is_full() {
+                self.insert_pin_init_append_tail(init)
+            } else {
+                self.insert_pin_init_new_group(init)
+            }
+        } else {
+            self.insert_pin_init_first(init)
+        }
+    }
+
+    #[cfg(feature = "pin-init")]
+    unsafe fn pin_init_slot<I, E>(ptr: *mut T, init: I) -> Result<(), E>
+    where
+        I: Init<T, E>,
+    {
+        let slot = &mut *(ptr as *mut MaybeUninit<T>);
+        match init.__init(PinUninit::new(slot)) {
+            Ok(_) => Ok(()),
+            Err(err) => Err(err.into_inner()),
         }
     }
 
@@ -938,6 +998,20 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         ptr
     }
 
+    #[cfg(feature = "pin-init")]
+    unsafe fn insert_pin_init_first<I, E>(&mut self, init: I) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        let pending = self.prepare_unlinked_group(None);
+        let group = pending.as_ptr();
+        let mut guard = PendingGroupInsertion::new(self, pending, None);
+        let ptr = (*group.as_ptr()).element_ptr_mut(0);
+        Self::pin_init_slot(ptr, init)?;
+        guard.commit_first();
+        Ok(ptr)
+    }
+
     unsafe fn insert_append_tail_with<F>(&mut self, f: F) -> *mut T
     where
         F: FnOnce(&mut MaybeUninit<T>),
@@ -954,6 +1028,26 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         (*gp).active_count += 1;
         self.len += 1;
         ptr
+    }
+
+    #[cfg(feature = "pin-init")]
+    unsafe fn insert_pin_init_append_tail<I, E>(&mut self, init: I) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        let mut end_cursor = self.end;
+        let end_group = end_cursor.group.unwrap();
+        let gp = end_group.as_ptr();
+        let elem_byte = end_cursor.element as *mut u8;
+        let ptr = elem_byte as *mut T;
+
+        Self::pin_init_slot(ptr, init)?;
+        end_cursor.element = elem_byte.add((*gp).slot_size);
+        end_cursor.skipfield = end_cursor.skipfield.add(1);
+        self.end = end_cursor;
+        (*gp).active_count += 1;
+        self.len += 1;
+        Ok(ptr)
     }
 
     unsafe fn insert_reuse_erased_with<F>(
@@ -997,6 +1091,48 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         ptr
     }
 
+    #[cfg(feature = "pin-init")]
+    unsafe fn insert_pin_init_reuse_erased<I, E>(
+        &mut self,
+        init: I,
+        erasure_group: NonNull<Group<T, A>>,
+    ) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        let gp = erasure_group.as_ptr();
+        let slot_size = (*gp).slot_size;
+        let elements_base = (*gp).elements_base();
+        let skipfield_base = (*gp).skipfield_ptr();
+        let index = (*gp).free_list_head;
+        debug_assert_ne!(index, u16::MAX);
+        let next_free = free_list::head_next::<T, A>(erasure_group);
+        let new_elem_byte = elements_base.add(index as usize * slot_size);
+        let ptr = new_elem_byte as *mut T;
+        let new_sf = skipfield_base.add(index as usize);
+
+        Self::pin_init_slot(ptr, init)?;
+
+        let begin = self.begin;
+        let update_begin = begin
+            .group
+            .is_some_and(|bg| erasure_group == bg && (new_elem_byte as *const u8) < begin.element);
+
+        free_list::pop_known_head::<T, A>(erasure_group, index, next_free);
+        skipfield::mark_constructed(erasure_group, index);
+        if (*gp).free_list_head == u16::MAX {
+            self.remove_from_erasures_list(erasure_group);
+        }
+        (*gp).active_count += 1;
+        self.len += 1;
+
+        if update_begin {
+            self.begin = make_cursor(erasure_group, new_elem_byte, new_sf);
+        }
+
+        Ok(ptr)
+    }
+
     unsafe fn insert_new_group_with<F>(&mut self, f: F) -> *mut T
     where
         F: FnOnce(&mut MaybeUninit<T>),
@@ -1015,6 +1151,21 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         self.end = Self::end_cursor_of(group, 1);
         self.len += 1;
         ptr
+    }
+
+    #[cfg(feature = "pin-init")]
+    unsafe fn insert_pin_init_new_group<I, E>(&mut self, init: I) -> Result<*mut T, E>
+    where
+        I: Init<T, E>,
+    {
+        let prev = self.tail;
+        let pending = self.prepare_unlinked_group(prev);
+        let group = pending.as_ptr();
+        let mut guard = PendingGroupInsertion::new(self, pending, prev);
+        let ptr = (*group.as_ptr()).element_ptr_mut(0);
+        Self::pin_init_slot(ptr, init)?;
+        guard.commit_new_group();
+        Ok(ptr)
     }
 }
 
