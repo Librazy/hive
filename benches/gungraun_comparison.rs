@@ -193,6 +193,62 @@ fn hive_raw_pointer_access() -> u64 {
     black_box(sum)
 }
 
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+fn hive_splice_into_empty() -> Hive<u64> {
+    let mut dest = Hive::new();
+    let mut source = Hive::with_capacity(INSERT_PATH_N);
+    for i in 0..INSERT_PATH_N as u64 {
+        source.insert(black_box(i));
+    }
+
+    dest.splice(&mut source).unwrap();
+
+    black_box(&source);
+    black_box(dest)
+}
+
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+fn hive_splice_append() -> Hive<u64> {
+    let mut dest = Hive::with_capacity(INSERT_PATH_N);
+    let mut source = Hive::with_capacity(INSERT_PATH_N);
+    for i in 0..INSERT_PATH_N as u64 {
+        dest.insert(black_box(i));
+        source.insert(black_box(i + INSERT_PATH_N as u64));
+    }
+
+    dest.splice(&mut source).unwrap();
+
+    black_box(&source);
+    black_box(dest)
+}
+
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+fn hive_splice_append_with_gaps() -> Hive<u64> {
+    let mut dest = Hive::with_capacity(INSERT_PATH_N);
+    let mut source = Hive::with_capacity(INSERT_PATH_N);
+    let ptrs: Vec<*const u64> = (0..INSERT_PATH_N as u64)
+        .map(|i| dest.insert(black_box(i)))
+        .collect();
+
+    for &ptr in ptrs.iter().step_by(8) {
+        unsafe {
+            dest.erase(ptr);
+        }
+    }
+    for i in 0..INSERT_PATH_N as u64 {
+        source.insert(black_box(i + INSERT_PATH_N as u64));
+    }
+
+    dest.splice(&mut source).unwrap();
+
+    black_box(&ptrs);
+    black_box(&source);
+    black_box(dest)
+}
+
 #[cfg(all(target_os = "linux", feature = "pin-init"))]
 library_benchmark_group!(
     name = hive_comparison,
@@ -205,7 +261,10 @@ library_benchmark_group!(
         hive_insert_with_reuse_erased,
         hive_erase_insert,
         hive_mixed_stable_reference,
-        hive_raw_pointer_access
+        hive_raw_pointer_access,
+        hive_splice_into_empty,
+        hive_splice_append,
+        hive_splice_append_with_gaps
     ]
 );
 
@@ -219,7 +278,10 @@ library_benchmark_group!(
         hive_insert_with_reuse_erased,
         hive_erase_insert,
         hive_mixed_stable_reference,
-        hive_raw_pointer_access
+        hive_raw_pointer_access,
+        hive_splice_into_empty,
+        hive_splice_append,
+        hive_splice_append_with_gaps
     ]
 );
 

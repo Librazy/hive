@@ -73,6 +73,13 @@ pub struct BlockCapacityLimits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidBlockCapacityLimits;
 
+/// Error returned when [`Hive::splice`] cannot transfer source groups without
+/// violating the destination hive's block capacity limits.
+///
+/// On error, both hives are left unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IncompatibleSplice;
+
 impl BlockCapacityLimits {
     /// Creates new block capacity limits.
     ///
@@ -591,6 +598,73 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
         (*gp).erasures_prev = None;
         (*gp).erasures_next = None;
+    }
+
+    unsafe fn append_erasures_list(&mut self, head: Option<NonNull<Group<T, A>>>) {
+        let Some(source_head) = head else {
+            return;
+        };
+
+        if let Some(dest_head) = self.erasure_groups_head {
+            let mut tail = dest_head;
+            while let Some(next) = (*tail.as_ptr()).erasures_next {
+                tail = next;
+            }
+            (*tail.as_ptr()).erasures_next = Some(source_head);
+            (*source_head.as_ptr()).erasures_prev = Some(tail);
+        } else {
+            self.erasure_groups_head = Some(source_head);
+            (*source_head.as_ptr()).erasures_prev = None;
+        }
+    }
+
+    unsafe fn mark_tail_unused_as_erased(&mut self) {
+        let Some(tail) = self.tail else {
+            return;
+        };
+        let gp = tail.as_ptr();
+        let end_index = (*gp).index_from_element_ptr(self.end.element as *const u8);
+        let distance = (*gp).capacity - end_index;
+        if distance == 0 {
+            return;
+        }
+
+        let idx = end_index as usize;
+        let previous_erased = end_index > 0 && (*gp).skipfield_at(idx - 1) != 0;
+        if previous_erased {
+            let previous_len = (*gp).skipfield_at(idx - 1);
+            let new_len = previous_len + distance;
+            let start = idx - previous_len as usize;
+            let end = (*gp).capacity as usize - 1;
+            (*gp).write_skipfield_at(start, new_len);
+            (*gp).write_skipfield_at(end, new_len);
+            if distance > 1 {
+                for i in idx..end {
+                    (*gp).write_skipfield_at(i, 1);
+                }
+            }
+        } else {
+            let mut added_to_erasures = false;
+            for index in end_index..(*gp).capacity {
+                added_to_erasures |= free_list::mark_erased(tail, index);
+            }
+            if added_to_erasures {
+                self.add_to_erasures_list(tail);
+            }
+        }
+    }
+
+    fn active_capacity(&self) -> usize {
+        let mut capacity = 0;
+        let mut g = self.head;
+        while let Some(group) = g {
+            unsafe {
+                let gp = group.as_ptr();
+                capacity += (*gp).capacity as usize;
+                g = (*gp).next;
+            }
+        }
+        capacity
     }
 
     unsafe fn move_to_reserved_list(&mut self, group: NonNull<Group<T, A>>) {
@@ -1756,68 +1830,93 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         }
     }
 
-    /// Moves all elements from `source` into `self`.
+    /// Splices all elements from `source` into `self` by transferring whole
+    /// groups.
     ///
-    /// This is **not** the C++ O(1) block-splicing operation. Elements are read
-    /// out of `source` and re-inserted into `self`. `source` is left empty.
+    /// On success, existing element pointers into both hives remain valid and
+    /// now refer to elements in `self`. `source` is left empty, except for any
+    /// reserved capacity it already held.
     ///
-    /// Self-splicing (passing `self` as `source`) is a no-op.
+    /// Self-splicing (passing `self` as `source`) is a no-op and returns
+    /// `Ok(())`.
     ///
-    /// # Panic safety
-    ///
-    /// This operation is not unwind-safe while elements are being moved out of
-    /// `source`. Do not rely on recovering from a panic during `splice`; if
-    /// unwinding occurs, the source hive's internal live-element bookkeeping may
-    /// no longer match which slots still contain initialized values.
-    pub fn splice(&mut self, source: &mut Self) {
+    /// Returns [`IncompatibleSplice`] if any active source group is outside the
+    /// destination hive's current block capacity limits. On error, both hives
+    /// are left unchanged.
+    pub fn splice(&mut self, source: &mut Self) -> Result<(), IncompatibleSplice> {
         if core::ptr::eq(self, source) || source.is_empty() {
-            return;
+            return Ok(());
         }
 
-        let mut values = alloc::vec::Vec::with_capacity(source.len());
-        unsafe {
-            let mut cur = source.begin;
-            let count = source.len;
-            for i in 0..count {
-                let gp = cur.group.unwrap().as_ptr();
-                let idx = (*gp).index_from_element_ptr(cur.element);
-                // Not unwind-safe: until source is cleared below, these reads
-                // leave moved-out slots that source still considers live.
-                values.push((*gp).element_ptr(idx).read());
-                if i + 1 < count {
-                    cur = cur.advance_forward();
-                }
-            }
-        }
-        source.len = 0;
-        source.clear_without_dropping_elements();
-        self.extend(values);
-    }
-
-    fn clear_without_dropping_elements(&mut self) {
-        let mut g = self.head;
-        while let Some(group) = g {
+        let limits = self.block_capacity_limits();
+        let mut group = source.head;
+        while let Some(g) = group {
             unsafe {
-                let gp = group.as_ptr();
-                let next = (*gp).next;
-                (*gp).active_count = 0;
-                (*gp).free_list_head = Group::<T, A>::none_index();
-                (*gp).erasures_next = None;
-                (*gp).erasures_prev = None;
-                (*gp).next = self.reserved_groups;
-                (*gp).prev = None;
-                let cap = (*gp).capacity as usize;
-                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap * Group::<T, A>::index_size());
-                self.reserved_groups = Some(group);
-                g = next;
+                let gp = g.as_ptr();
+                if (*gp).capacity < limits.min || (*gp).capacity > limits.max {
+                    return Err(IncompatibleSplice);
+                }
+                group = (*gp).next;
             }
         }
-        self.head = None;
-        self.tail = None;
-        self.lookup_hint.set(None);
-        self.begin = null_cursor();
-        self.end = null_cursor();
-        self.erasure_groups_head = None;
+
+        unsafe {
+            let source_head = source.head.unwrap();
+            let source_tail = source.tail.unwrap();
+            let source_begin = source.begin;
+            let source_end = source.end;
+            let source_erasure_groups_head = source.erasure_groups_head;
+            let source_len = source.len;
+            let source_reserved = source.reserved_groups;
+            let source_active_capacity = source.active_capacity();
+
+            source.head = None;
+            source.tail = None;
+            source.begin = null_cursor();
+            source.end = null_cursor();
+            source.reserved_groups = None;
+            source.lookup_hint.set(None);
+
+            if self.len == 0 {
+                if let Some(group) = self.head {
+                    let gp = group.as_ptr();
+                    self.capacity = self.capacity.saturating_sub((*gp).capacity as usize);
+                    Group::deallocate_group(group);
+                }
+                self.head = Some(source_head);
+                self.tail = Some(source_tail);
+                self.begin = source_begin;
+                self.end = source_end;
+                self.erasure_groups_head = source_erasure_groups_head;
+                self.len = source_len;
+                self.capacity = self.capacity.saturating_add(source_active_capacity);
+            } else {
+                self.mark_tail_unused_as_erased();
+                let tail = self.tail.unwrap();
+                (*tail.as_ptr()).next = Some(source_head);
+                (*source_head.as_ptr()).prev = Some(tail);
+                self.append_erasures_list(source_erasure_groups_head);
+                self.tail = Some(source_tail);
+                self.end = source_end;
+                self.len += source_len;
+                self.capacity += source_active_capacity;
+            }
+
+            source.len = 0;
+            source.erasure_groups_head = None;
+            source.reserved_groups = source_reserved;
+            source.capacity = 0;
+            let mut reserved = source.reserved_groups;
+            while let Some(group) = reserved {
+                let gp = group.as_ptr();
+                source.capacity += (*gp).capacity as usize;
+                reserved = (*gp).next;
+            }
+            self.lookup_hint.set(None);
+            source.lookup_hint.set(None);
+        }
+
+        Ok(())
     }
 }
 
