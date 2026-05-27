@@ -72,7 +72,7 @@ pub mod hive;
 mod iter;
 pub mod pool;
 
-pub use hive::{BlockCapacityLimits, Hive, InvalidBlockCapacityLimits};
+pub use hive::{BlockCapacityLimits, Hive, IncompatibleSplice, InvalidBlockCapacityLimits};
 pub use pool::{Pool, Pooled};
 #[cfg(feature = "std")]
 pub use pool::{SyncPool, SyncPooled};

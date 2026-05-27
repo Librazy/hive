@@ -3,7 +3,7 @@
 use hive::allocator::Global;
 #[cfg(feature = "std")]
 use hive::SyncPool;
-use hive::{BlockCapacityLimits, Hive, Pool};
+use hive::{BlockCapacityLimits, Hive, IncompatibleSplice, Pool};
 use std::cell::Cell;
 #[cfg(feature = "pin-init")]
 use std::convert::Infallible;
@@ -1348,10 +1348,113 @@ fn test_splice_moves_source_elements() {
     let mut b = Hive::new();
     b.extend([3, 4]);
 
-    a.splice(&mut b);
+    a.splice(&mut b).unwrap();
 
     assert!(b.is_empty());
     assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_splice_preserves_element_pointers() {
+    let mut a = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let a_ptrs: Vec<*const i32> = (0..6).map(|i| a.insert(i)).collect();
+    let mut b = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let b_ptrs: Vec<*const i32> = (10..16).map(|i| b.insert(i)).collect();
+
+    a.splice(&mut b).unwrap();
+
+    assert!(b.is_empty());
+    assert_eq!(
+        a.iter().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
+    );
+    for (i, &ptr) in a_ptrs.iter().enumerate() {
+        assert_eq!(unsafe { *ptr }, i as i32);
+        assert!(unsafe { a.get(ptr) }.is_some());
+    }
+    for (i, &ptr) in b_ptrs.iter().enumerate() {
+        assert_eq!(unsafe { *ptr }, 10 + i as i32);
+        assert!(unsafe { a.get(ptr) }.is_some());
+    }
+}
+
+#[test]
+fn test_splice_into_empty_preserves_source_pointers_and_reserved_capacity() {
+    let mut a = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    a.reserve(16);
+    let reserved_capacity = a.capacity();
+
+    let mut b = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let b_ptrs: Vec<*const i32> = (0..10).map(|i| b.insert(i)).collect();
+
+    a.splice(&mut b).unwrap();
+
+    assert!(b.is_empty());
+    assert_eq!(a.capacity(), reserved_capacity - 8 + 16);
+    assert_eq!(
+        a.iter().copied().collect::<Vec<_>>(),
+        (0..10).collect::<Vec<_>>()
+    );
+    for (i, &ptr) in b_ptrs.iter().enumerate() {
+        assert_eq!(unsafe { *ptr }, i as i32);
+        assert!(unsafe { a.get(ptr) }.is_some());
+    }
+}
+
+#[test]
+fn test_splice_reuses_old_destination_tail_gap() {
+    let mut a = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let a_ptrs: Vec<*const i32> = (0..5).map(|i| a.insert(i)).collect();
+    let mut b = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    b.extend(10..14);
+
+    a.splice(&mut b).unwrap();
+
+    let p = a.insert(99);
+    assert_eq!(p, unsafe { a_ptrs[0].add(5) });
+    assert_eq!(unsafe { *p }, 99);
+}
+
+#[test]
+fn test_splice_preserves_source_erased_slot_reuse() {
+    let mut a = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    a.extend(0..4);
+
+    let mut b = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let b_ptrs: Vec<*const i32> = (10..18).map(|i| b.insert(i)).collect();
+    unsafe {
+        b.erase(b_ptrs[2]);
+    }
+
+    a.splice(&mut b).unwrap();
+
+    for i in 0..4 {
+        a.insert(90 + i);
+    }
+    let reused = a.insert(99);
+
+    assert_eq!(reused, b_ptrs[2]);
+    assert_eq!(unsafe { *reused }, 99);
+}
+
+#[test]
+fn test_splice_incompatible_limits_leaves_both_hives_unchanged() {
+    let mut a = Hive::try_new(BlockCapacityLimits::new(16, 16)).unwrap();
+    a.extend(0..4);
+    let mut b = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let b_ptrs: Vec<*const i32> = (10..18).map(|i| b.insert(i)).collect();
+
+    assert_eq!(a.splice(&mut b), Err(IncompatibleSplice));
+
+    assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    assert_eq!(
+        b.iter().copied().collect::<Vec<_>>(),
+        vec![10, 11, 12, 13, 14, 15, 16, 17]
+    );
+    for (i, &ptr) in b_ptrs.iter().enumerate() {
+        assert_eq!(unsafe { *ptr }, 10 + i as i32);
+        assert!(unsafe { b.get(ptr) }.is_some());
+    }
 }
 
 #[test]
