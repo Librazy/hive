@@ -16,7 +16,7 @@ safe_object_pool_custom_allocator = []
 pin-init = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bench]]
 name = "comparison"
