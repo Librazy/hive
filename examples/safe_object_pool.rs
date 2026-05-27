@@ -6,8 +6,6 @@
 //! Run with the example custom allocator:
 //! `cargo run --example safe_object_pool --features safe_object_pool_custom_allocator`
 
-#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
-
 use hive::Pool;
 
 #[cfg(feature = "safe_object_pool_custom_allocator")]

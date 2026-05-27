@@ -1,11 +1,17 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hive::Hive;
+#[cfg(feature = "pin-init")]
+use pin_init::{init_from_closure, InitResult, PinUninit};
 use std::collections::{LinkedList, VecDeque};
+#[cfg(feature = "pin-init")]
+use std::convert::Infallible;
+#[cfg(feature = "pin-init")]
+use std::ptr;
 use std::time::{Duration, Instant};
 
-const LARGE_N: usize = 100_000;
-const MIXED_N: usize = 2_000;
-const INSERT_PATH_N: usize = 10_000;
+const LARGE_N: usize = 1048576;
+const MIXED_N: usize = 65536;
+const INSERT_PATH_N: usize = 131072;
 
 #[derive(Clone, Default)]
 struct NonTrivialElement {
@@ -34,6 +40,23 @@ impl NonTrivialElement {
             .extend([i as u64, i as u64 + 1, i as u64 + 2, i as u64 + 3]);
         self.checksum = self.data.iter().copied().fold(i as u64, u64::wrapping_add);
     }
+}
+
+#[cfg(feature = "pin-init")]
+fn non_trivial_pin_init(i: usize) -> impl pin_init::Init<NonTrivialElement, Infallible> {
+    init_from_closure(
+        move |mut this: PinUninit<'_, NonTrivialElement>| -> InitResult<'_, NonTrivialElement, Infallible> {
+            let ptr = this.get_mut().as_mut_ptr();
+            let data = vec![i as u64, i as u64 + 1, i as u64 + 2, i as u64 + 3];
+            let checksum = data.iter().copied().fold(i as u64, u64::wrapping_add);
+            unsafe {
+                ptr::addr_of_mut!((*ptr).name).write(format!("element-{i}"));
+                ptr::addr_of_mut!((*ptr).data).write(data);
+                ptr::addr_of_mut!((*ptr).checksum).write(checksum);
+                Ok(this.init_ok())
+            }
+        },
+    )
 }
 
 fn bench_append(c: &mut Criterion) {
@@ -184,6 +207,43 @@ fn bench_hive_insertion_paths(c: &mut Criterion) {
             elapsed
         });
     });
+    #[cfg(feature = "pin-init")]
+    group.bench_function(BenchmarkId::new("insert_pin_init", INSERT_PATH_N), |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut h = Hive::with_capacity(INSERT_PATH_N);
+                for i in 0..INSERT_PATH_N {
+                    h.insert_pin_init::<_, Infallible>(black_box(NonTrivialElement::new(i)))
+                        .unwrap();
+                }
+                black_box(&mut h);
+                elapsed += start.elapsed();
+            }
+            elapsed
+        });
+    });
+    #[cfg(feature = "pin-init")]
+    group.bench_function(
+        BenchmarkId::new("insert_pin_init_fields", INSERT_PATH_N),
+        |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let mut h = Hive::with_capacity(INSERT_PATH_N);
+                    for i in 0..INSERT_PATH_N {
+                        h.insert_pin_init(non_trivial_pin_init(black_box(i)))
+                            .unwrap();
+                    }
+                    black_box(&mut h);
+                    elapsed += start.elapsed();
+                }
+                elapsed
+            });
+        },
+    );
     group.bench_function(BenchmarkId::new("insert_with", INSERT_PATH_N), |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -262,47 +322,50 @@ fn bench_iteration(c: &mut Criterion) {
 
 fn bench_erase_reinsert(c: &mut Criterion) {
     let mut group = c.benchmark_group("erase_reinsert_every_10th");
-    group.bench_function(BenchmarkId::new("Hive erase+insert", LARGE_N), |b| {
+    group.bench_function(BenchmarkId::new("Hive erase+insert", INSERT_PATH_N), |b| {
         b.iter(|| {
-            let mut h = Hive::with_capacity(LARGE_N);
-            let ptrs: Vec<*const u64> = (0..LARGE_N as u64).map(|i| h.insert(i)).collect();
+            let mut h = Hive::with_capacity(INSERT_PATH_N);
+            let ptrs: Vec<*const u64> = (0..INSERT_PATH_N as u64).map(|i| h.insert(i)).collect();
 
-            for i in (0..LARGE_N).step_by(10) {
+            for i in (0..INSERT_PATH_N).step_by(10) {
                 unsafe {
                     h.erase(ptrs[i]);
                 }
             }
-            for i in (0..LARGE_N).step_by(10) {
-                h.insert(black_box(i as u64 + LARGE_N as u64));
+            for i in (0..INSERT_PATH_N).step_by(10) {
+                h.insert(black_box(i as u64 + INSERT_PATH_N as u64));
             }
             black_box(h);
         });
     });
-    group.bench_function(BenchmarkId::new("Vec remove+push", LARGE_N), |b| {
+    group.bench_function(BenchmarkId::new("Vec remove+push", INSERT_PATH_N), |b| {
         b.iter(|| {
-            let mut v: Vec<u64> = (0..LARGE_N as u64).collect();
-            for i in (0..LARGE_N).step_by(10).rev() {
+            let mut v: Vec<u64> = (0..INSERT_PATH_N as u64).collect();
+            for i in (0..INSERT_PATH_N).step_by(10).rev() {
                 v.remove(i);
             }
-            for i in (0..LARGE_N).step_by(10) {
-                v.push(black_box(i as u64 + LARGE_N as u64));
+            for i in (0..INSERT_PATH_N).step_by(10) {
+                v.push(black_box(i as u64 + INSERT_PATH_N as u64));
             }
             black_box(v);
         });
     });
-    group.bench_function(BenchmarkId::new("LinkedList filter+append", LARGE_N), |b| {
-        b.iter(|| {
-            let mut l: LinkedList<u64> = (0..LARGE_N as u64)
-                .enumerate()
-                .filter(|(i, _)| i % 10 != 0)
-                .map(|(_, v)| v)
-                .collect();
-            for i in (0..LARGE_N).step_by(10) {
-                l.push_back(black_box(i as u64 + LARGE_N as u64));
-            }
-            black_box(l);
-        });
-    });
+    group.bench_function(
+        BenchmarkId::new("LinkedList filter+append", INSERT_PATH_N),
+        |b| {
+            b.iter(|| {
+                let mut l: LinkedList<u64> = (0..INSERT_PATH_N as u64)
+                    .enumerate()
+                    .filter(|(i, _)| i % 10 != 0)
+                    .map(|(_, v)| v)
+                    .collect();
+                for i in (0..INSERT_PATH_N).step_by(10) {
+                    l.push_back(black_box(i as u64 + INSERT_PATH_N as u64));
+                }
+                black_box(l);
+            });
+        },
+    );
     group.finish();
 }
 
@@ -364,7 +427,7 @@ fn bench_pointer_access(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(20);
+    config = Criterion::default().sample_size(20).measurement_time(Duration::from_secs(10));
     targets = bench_append,
         bench_hive_insertion_paths,
         bench_iteration,

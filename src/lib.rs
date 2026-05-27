@@ -41,6 +41,7 @@
 //! |---|---|---|
 //! | `std` | Yes | Enables `std` support (disabling gives `no_std` + `alloc`) |
 //! | `allocator_api` | No | Unlocks custom allocator support via nightly `Allocator` trait |
+//! | `pin-init` | No | Enables safe in-place pinned initialization via `pin-init` |
 //!
 //! # Nightly requirement
 //!
