@@ -104,8 +104,10 @@ impl BlockCapacityLimits {
 /// # Pointer stability
 ///
 /// Raw pointers from [`insert`](Hive::insert) and
-/// [`insert_mut`](Hive::insert_mut) remain valid until the element is erased.
-/// Inserting other elements never moves existing ones.
+/// [`insert_mut`](Hive::insert_mut) remain valid until the element is erased or
+/// an operation explicitly compacts/reallocates groups, such as
+/// [`reshape`](Hive::reshape) or some [`shrink_to_fit`](Hive::shrink_to_fit)
+/// calls. Inserting other elements never moves existing ones.
 ///
 /// # Examples
 ///
@@ -786,8 +788,10 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Inserts an element and returns a stable raw pointer to it.
     ///
     /// The pointer remains valid until the element is erased via
-    /// [`erase`](Hive::erase), [`retain`](Hive::retain), or a consuming
-    /// operation. Other insertions and erasures never move this element.
+    /// [`erase`](Hive::erase), [`retain`](Hive::retain), or until an operation
+    /// explicitly compacts/reallocates groups, such as [`reshape`](Hive::reshape)
+    /// or some [`shrink_to_fit`](Hive::shrink_to_fit) calls. Other insertions
+    /// and erasures never move this element.
     ///
     /// # Examples
     ///
@@ -1444,6 +1448,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     ///
     /// In debug builds, panics if the hive is empty, the pointer does not
     /// belong to any group, or the element is already erased.
+    ///
+    /// # Panic safety
+    ///
+    /// If `T::drop` panics while erasing the element, the hive may still mark
+    /// that slot as live. Do not rely on recovering and continuing to use the
+    /// hive after an element destructor panics.
     pub unsafe fn erase(&mut self, element_ptr: *const T) {
         self.erase_raw(element_ptr as *mut T);
     }
@@ -1505,6 +1515,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// and may be reused on subsequent insertions. To release the reserved
     /// blocks as well, call [`trim_capacity`](Hive::trim_capacity) or
     /// [`shrink_to_fit`](Hive::shrink_to_fit) afterwards.
+    ///
+    /// # Panic safety
+    ///
+    /// If an element destructor panics, the hive may still mark already-dropped
+    /// slots as live. Do not rely on recovering and continuing to use the hive
+    /// after `T::drop` panics during `clear`.
     ///
     /// # Examples
     ///

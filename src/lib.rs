@@ -26,7 +26,9 @@
 //!
 //! Raw pointers returned by [`insert`](Hive::insert) and
 //! [`insert_mut`](Hive::insert_mut) remain valid until the corresponding element
-//! is erased. Inserting new elements never moves existing ones.
+//! is erased or an operation explicitly compacts/reallocates groups, such as
+//! [`reshape`](Hive::reshape) or some [`shrink_to_fit`](Hive::shrink_to_fit)
+//! calls. Inserting new elements never moves existing ones.
 //!
 //! # Safety around erasure
 //!
@@ -43,10 +45,11 @@
 //! | `allocator_api` | No | Unlocks custom allocator support via nightly `Allocator` trait |
 //! | `pin-init` | No | Enables safe in-place pinned initialization via `pin-init` |
 //!
-//! # Nightly requirement
+//! # Toolchain support
 //!
-//! This crate requires a nightly Rust toolchain because it uses the
-//! `allocator_api` unstable feature.
+//! Default builds work on stable Rust. The `allocator_api` feature requires a
+//! nightly Rust toolchain because it enables Rust's unstable `Allocator` trait
+//! for custom allocator support.
 //!
 //! # Object pools
 //!

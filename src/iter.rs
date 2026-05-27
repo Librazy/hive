@@ -47,9 +47,9 @@ macro_rules! iter_next_back {
 
 /// A shared iterator over the elements of a [`Hive`](crate::Hive).
 ///
-/// Yields `&T` in insertion order (left-to-right across blocks). Erasing during
-/// iteration is allowed and valid — it does not invalidate the iterator, but
-/// any erased element will not be visited again.
+/// Yields `&T` in insertion order (left-to-right across blocks). The iterator
+/// has a fixed remaining length and must not be used after externally erasing
+/// elements through raw-pointer APIs.
 ///
 /// This iterator is double-ended, exact-size, and fused.
 pub struct Iter<'a, T: 'a, A: Allocator + 'a> {
