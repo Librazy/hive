@@ -656,6 +656,58 @@ fn test_sort_by_desc() {
 }
 
 #[test]
+fn test_sort_by_panic_leaves_hive_valid() {
+    let drops = Rc::new(Cell::new(0));
+
+    #[derive(Debug)]
+    struct Tracked {
+        value: i32,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    let mut h = Hive::new();
+    let ptrs: Vec<*const Tracked> = (0..16)
+        .rev()
+        .map(|value| {
+            h.insert(Tracked {
+                value,
+                drops: drops.clone(),
+            })
+        })
+        .collect();
+
+    let mut comparisons = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.sort_by(|a, b| {
+            comparisons += 1;
+            if comparisons == 5 {
+                panic!("comparator failed");
+            }
+            a.value.cmp(&b.value)
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(h.len(), 16);
+    assert_eq!(drops.get(), 0);
+    for ptr in ptrs {
+        assert!(unsafe { h.get(ptr) }.is_some());
+    }
+    let mut vals: Vec<i32> = h.iter().map(|v| v.value).collect();
+    vals.sort();
+    assert_eq!(vals, (0..16).collect::<Vec<_>>());
+
+    drop(h);
+    assert_eq!(drops.get(), 16);
+}
+
+#[test]
 fn test_stable_references() {
     let mut h = Hive::new();
     let r1 = h.insert(10);

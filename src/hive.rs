@@ -2013,10 +2013,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     ///
     /// # Panic safety
     ///
-    /// This operation is not unwind-safe after values start being moved between
-    /// slots. The comparator should not panic. Do not rely on recovering from a
-    /// panic during `sort_by`; the hive's internal live-element bookkeeping may
-    /// no longer match which slots still contain initialized values.
+    /// If the comparator panics, the hive remains valid and destructible, but
+    /// the order of elements is unspecified.
     ///
     /// # Examples
     ///
@@ -2034,39 +2032,29 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         if count <= 1 {
             return;
         }
-        let mut v: alloc::vec::Vec<*mut T> = alloc::vec::Vec::with_capacity(count);
+        let mut v: alloc::vec::Vec<(*mut T, usize)> = alloc::vec::Vec::with_capacity(count);
         unsafe {
             let mut cur = self.begin;
             for i in 0..count {
                 let gp = cur.group.unwrap().as_ptr();
                 let idx = (*gp).index_from_element_ptr(cur.element);
-                v.push((*gp).element_ptr_mut(idx));
+                v.push(((*gp).element_ptr_mut(idx), i));
                 if i + 1 < count {
                     cur = cur.advance_forward();
                 }
             }
         }
 
-        v.sort_by(|a, b| unsafe { compare(&**a, &**b) });
+        v.sort_by(|a, b| unsafe { compare(&*a.0, &*b.0) });
 
-        let mut values: alloc::vec::Vec<T> = alloc::vec::Vec::with_capacity(count);
-        for ptr in &v {
-            unsafe {
-                // Not unwind-safe: slots are moved out before all replacement
-                // values are written back below.
-                values.push(ptr.read());
-            }
-        }
-
-        unsafe {
-            let mut cur = self.begin;
-            for (i, value) in values.into_iter().enumerate() {
-                let gp = cur.group.unwrap().as_ptr();
-                let idx = (*gp).index_from_element_ptr(cur.element);
-                (*gp).element_ptr_mut(idx).write(value);
-                if i + 1 < count {
-                    cur = cur.advance_forward();
+        for i in 0..count {
+            let current = i;
+            while v[current].1 != current {
+                let source = v[current].1;
+                unsafe {
+                    core::ptr::swap(v[current].0, v[source].0);
                 }
+                v.swap(current, source);
             }
         }
     }
