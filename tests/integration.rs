@@ -1371,6 +1371,22 @@ fn test_shrink_to_fit_reduces_capacity() {
 }
 
 #[test]
+fn test_shrink_to_fit_trims_reserved_without_moving_live_elements() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(8, 32)).unwrap();
+    let ptrs: Vec<*const i32> = (0..40).map(|i| h.insert(i)).collect();
+    let live_capacity = h.capacity();
+    h.reserve(100);
+    assert!(h.capacity() > live_capacity);
+
+    h.shrink_to_fit();
+
+    assert_eq!(h.capacity(), live_capacity);
+    for (i, &ptr) in ptrs.iter().enumerate() {
+        assert_eq!(unsafe { *ptr }, i as i32);
+    }
+}
+
+#[test]
 fn test_erase_and_iterate() {
     let mut h = Hive::new();
     let refs: Vec<*const i32> = (0..100).map(|i| h.insert(i)).collect();
