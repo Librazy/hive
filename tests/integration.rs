@@ -489,16 +489,19 @@ fn test_block_capacity_limit_apis() {
     let defaults = Hive::<i32>::block_capacity_default_limits();
     assert!(defaults.min >= 8);
     assert!(defaults.min <= defaults.max);
-    assert_eq!(defaults.max, 255);
+    assert_eq!(defaults.max, 8192);
     assert_eq!(Hive::<i32>::block_capacity_hard_limits().min, 3);
-    assert_eq!(Hive::<i32>::block_capacity_hard_limits().max, 255);
+    assert_eq!(Hive::<i32>::block_capacity_hard_limits().max, u16::MAX);
 
     let h = Hive::<i32>::try_new(BlockCapacityLimits::new(4, 16)).unwrap();
     assert_eq!(h.block_capacity_limits(), BlockCapacityLimits::new(4, 16));
 
     assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(2, 16)).is_err());
     assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(16, 4)).is_err());
-    assert!(Hive::<i32>::try_new(BlockCapacityLimits::new(4, 256)).is_err());
+    assert!(Hive::<u8>::try_new(BlockCapacityLimits::new(4, 256)).is_err());
+    assert_eq!(Hive::<u8>::block_capacity_hard_limits().max, 255);
+    assert_eq!(Hive::<u8>::block_capacity_default_limits().max, 255);
+    assert_eq!(Hive::<u64>::block_capacity_default_limits().max, 8192);
 
     assert_eq!(Hive::<[u8; 16]>::block_capacity_hard_limits().max, u16::MAX);
     assert_eq!(Hive::<[u8; 16]>::block_capacity_default_limits().max, 8192);
@@ -1511,18 +1514,18 @@ fn test_splice_incompatible_limits_leaves_both_hives_unchanged() {
 
 #[test]
 fn test_shrink_to_fit_reduces_capacity() {
-    let mut h = Hive::new();
+    let mut h = Hive::<u8>::new();
     h.reserve(500);
-    for i in 0..10 {
+    for i in 0u8..10 {
         h.insert(i);
     }
     let before = h.capacity();
     h.shrink_to_fit();
     assert!(h.capacity() < before);
     assert_eq!(h.len(), 10);
-    let mut vals: Vec<i32> = h.iter().copied().collect();
+    let mut vals: Vec<u8> = h.iter().copied().collect();
     vals.sort();
-    assert_eq!(vals, (0..10).collect::<Vec<_>>());
+    assert_eq!(vals, (0u8..10).collect::<Vec<_>>());
 }
 
 #[test]
