@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 /// which erase their element when dropped. The restricted API is what makes it
 /// sound to hand out `&T`/`&mut T` references while the pool remains available.
 ///
-/// `Pool` is `!Send` and `!Sync` because [`Pooled`] borrows the pool.
+/// `Pool` is not `Sync`; use [`SyncPool`] when sharing a pool between threads.
 ///
 /// # Examples
 ///
@@ -65,7 +65,14 @@ pub struct Pool<T, A: Allocator + Clone = Global> {
 /// Provides `Deref`/`DerefMut` access to the underlying `T`. When the guard is
 /// dropped, the element is erased from the pool.
 ///
-/// `Pooled` is `!Send` and `!Sync` because it borrows the pool mutably.
+/// `Pooled` is not `Send` or `Sync` because it borrows the pool mutably.
+///
+/// # Panic safety
+///
+/// Dropping a guard erases its element from the pool. If `T::drop` panics while
+/// the guard is being dropped, the backing hive may still mark that slot as
+/// live. Do not rely on recovering and continuing to use the pool after an
+/// element destructor panics during guard drop.
 pub struct Pooled<'a, T, A: Allocator + Clone = Global> {
     pool: &'a Pool<T, A>,
     ptr: NonNull<T>,
@@ -274,7 +281,14 @@ pub struct SyncPool<T, A: Allocator + Clone = Global> {
 ///
 /// Provides `Deref`/`DerefMut` access. Dropping the guard erases the element
 /// from the pool (acquiring the mutex to do so). The guard implements `Send`
-/// when `T` and `A` are `Send`, and `Sync` when `T` is `Sync`.
+/// when `T` and `A` are `Send`, and `Sync` when `T: Sync` and `A: Send`.
+///
+/// # Panic safety
+///
+/// Dropping a guard erases its element from the pool. If `T::drop` panics while
+/// the guard is being dropped, the backing hive may still mark that slot as
+/// live. Do not rely on recovering and continuing to use the pool after an
+/// element destructor panics during guard drop.
 #[cfg(feature = "std")]
 pub struct SyncPooled<T, A: Allocator + Clone = Global> {
     hive: Arc<Mutex<Hive<T, A>>>,
