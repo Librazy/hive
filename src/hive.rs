@@ -1587,9 +1587,11 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Shrinks the hive to use only the minimum capacity needed for its current
     /// elements.
     ///
-    /// All reserved groups are deallocated. If the hive is non-empty, elements
-    /// may be compacted into new groups that match the current block capacity
-    /// limits. This is an O(n) operation.
+    /// Reserved groups are deallocated first. If all live groups already fit
+    /// the current block capacity limits, live elements are not moved and
+    /// existing element pointers remain valid. Otherwise, elements are compacted
+    /// into new groups that match the current block capacity limits, which
+    /// invalidates all existing element pointers. This is an O(n) operation.
     pub fn shrink_to_fit(&mut self) {
         if self.capacity == self.len {
             return;
@@ -1612,7 +1614,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             return;
         }
 
-        self.compact_to_limits(self.block_capacity_limits());
+        let limits = self.block_capacity_limits();
+        if self.groups_fit_limits(limits) {
+            self.trim_capacity();
+        } else {
+            self.compact_to_limits(limits);
+        }
     }
 
     /// Updates block capacity limits, compacting existing elements if
