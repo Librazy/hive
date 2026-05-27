@@ -34,7 +34,7 @@ use pin_init::{Init, PinUninit};
 use crate::free_list;
 use crate::group::Group;
 use crate::iter::{IntoIter, Iter, IterMut};
-use crate::skipfield::{self, Cursor};
+use crate::skipfield::Cursor;
 
 const DEFAULT_MIN_BLOCK_CAPACITY: u16 = 8;
 const DEFAULT_MAX_BLOCK_CAPACITY: u16 = 8192;
@@ -747,8 +747,13 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Constructs an element in-place in a hive slot.
     ///
     /// The closure receives a `&mut MaybeUninit<T>` pointing to uninitialized
-    /// memory inside a hive slot. It must initialize the slot exactly once. The
-    /// returned pointer is stable until the element is erased.
+    /// memory inside a hive slot. It must initialize the slot exactly once and
+    /// must not unwind. The returned pointer is stable until the element is
+    /// erased.
+    ///
+    /// If you need panic/error-safe in-place initialization, enable the
+    /// `pin-init` feature and use [`insert_pin_init`](Hive::insert_pin_init) or
+    /// [`insert_pin_init_mut`](Hive::insert_pin_init_mut) instead.
     ///
     /// # Safety
     ///
@@ -756,12 +761,10 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// - Initialize the supplied `MaybeUninit<T>` exactly once (via
     ///   `MaybeUninit::write` or equivalent).
     /// - **Not** read from the slot before initialization.
-    /// - **Not** unwind (panic) after initializing it (doing so would leave a
-    ///   partially-initialized element in the hive, leading to a double-drop or
-    ///   use-after-free).
-    ///
-    /// If the closure panics before initializing the slot, the hive remains
-    /// internally consistent.
+    /// - **Not** unwind (panic), before or after initializing the slot. The
+    ///   hive may reserve or relink internal storage before invoking the
+    ///   closure, so unwinding from the closure may leave internal bookkeeping
+    ///   inconsistent.
     pub unsafe fn insert_with_uninit<F>(&mut self, f: F) -> *const T
     where
         F: FnOnce(&mut MaybeUninit<T>),
@@ -920,9 +923,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             .is_some_and(|bg| erasure_group == bg && (new_elem_byte as *const u8) < begin.element);
 
         ptr.write(T::default());
-        free_list::pop_known_head::<T, A>(erasure_group, index, next_free);
-        skipfield::mark_constructed(erasure_group, index);
-        if (*gp).free_list_head == u16::MAX {
+        if free_list::consume_head_skipblock_with_next::<T, A>(erasure_group, index, next_free) {
             self.remove_from_erasures_list(erasure_group);
         }
         (*gp).active_count += 1;
@@ -1066,7 +1067,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let elements_base = (*gp).elements_base();
         let skipfield_base = (*gp).skipfield_ptr();
 
-        let index = free_list::pop_free_slot::<T, A>(erasure_group);
+        let index = (*gp).free_list_head;
+        debug_assert_ne!(index, u16::MAX);
         let new_elem_byte = elements_base.add(index as usize * slot_size);
         let ptr = new_elem_byte as *mut T;
         let new_sf = skipfield_base.add(index as usize);
@@ -1076,8 +1078,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             .group
             .is_some_and(|bg| erasure_group == bg && (new_elem_byte as *const u8) < begin.element);
 
-        skipfield::mark_constructed(erasure_group, index);
-        if (*gp).free_list_head == u16::MAX {
+        if free_list::consume_head_skipblock::<T, A>(erasure_group, index) {
             self.remove_from_erasures_list(erasure_group);
         }
         f(&mut *(ptr as *mut MaybeUninit<T>));
@@ -1118,9 +1119,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             .group
             .is_some_and(|bg| erasure_group == bg && (new_elem_byte as *const u8) < begin.element);
 
-        free_list::pop_known_head::<T, A>(erasure_group, index, next_free);
-        skipfield::mark_constructed(erasure_group, index);
-        if (*gp).free_list_head == u16::MAX {
+        if free_list::consume_head_skipblock_with_next::<T, A>(erasure_group, index, next_free) {
             self.remove_from_erasures_list(erasure_group);
         }
         (*gp).active_count += 1;
@@ -1333,10 +1332,7 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         (*gp).active_count = new_active;
 
         if new_active > 0 {
-            skipfield::mark_erased(group, index);
-            let was_empty = (*gp).free_list_head == u16::MAX;
-            free_list::push_free_slot::<T, A>(group, index);
-            if was_empty {
+            if free_list::mark_erased::<T, A>(group, index) {
                 self.add_to_erasures_list(group);
             }
             let begin = self.begin;
@@ -1688,6 +1684,13 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// out of `source` and re-inserted into `self`. `source` is left empty.
     ///
     /// Self-splicing (passing `self` as `source`) is a no-op.
+    ///
+    /// # Panic safety
+    ///
+    /// This operation is not unwind-safe while elements are being moved out of
+    /// `source`. Do not rely on recovering from a panic during `splice`; if
+    /// unwinding occurs, the source hive's internal live-element bookkeeping may
+    /// no longer match which slots still contain initialized values.
     pub fn splice(&mut self, source: &mut Self) {
         if core::ptr::eq(self, source) || source.is_empty() {
             return;
@@ -1700,6 +1703,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             for i in 0..count {
                 let gp = cur.group.unwrap().as_ptr();
                 let idx = (*gp).index_from_element_ptr(cur.element);
+                // Not unwind-safe: until source is cleared below, these reads
+                // leave moved-out slots that source still considers live.
                 values.push((*gp).element_ptr(idx).read());
                 if i + 1 < count {
                     cur = cur.advance_forward();
@@ -1828,6 +1833,13 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// Element addresses are preserved — elements are not moved in memory,
     /// only their values are rearranged. This is an O(n log n) operation.
     ///
+    /// # Panic safety
+    ///
+    /// This operation is not unwind-safe after values start being moved between
+    /// slots. The comparator should not panic. Do not rely on recovering from a
+    /// panic during `sort_by`; the hive's internal live-element bookkeeping may
+    /// no longer match which slots still contain initialized values.
+    ///
     /// # Examples
     ///
     /// ```
@@ -1862,6 +1874,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
         let mut values: alloc::vec::Vec<T> = alloc::vec::Vec::with_capacity(count);
         for ptr in &v {
             unsafe {
+                // Not unwind-safe: slots are moved out before all replacement
+                // values are written back below.
                 values.push(ptr.read());
             }
         }

@@ -1423,3 +1423,100 @@ fn test_erase_pointer_from_iter_mut() {
     vals.sort();
     assert_eq!(vals, vec![1, 3]);
 }
+
+#[test]
+fn test_reuse_skipblock_from_front_in_order() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
+
+    for &idx in &[2usize, 3, 4] {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let a = h.insert(100);
+    let b = h.insert(101);
+    let c = h.insert(102);
+
+    assert_eq!([a, b, c], [refs[2], refs[3], refs[4]]);
+    let mut vals: Vec<i32> = h.iter().copied().collect();
+    vals.sort();
+    assert_eq!(vals, vec![0, 1, 5, 6, 7, 100, 101, 102]);
+}
+
+#[test]
+fn test_reuse_after_moving_following_skipblock_head_forward() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
+
+    for &idx in &[3usize, 4, 2] {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let a = h.insert(100);
+    let b = h.insert(101);
+    let c = h.insert(102);
+
+    assert_eq!([a, b, c], [refs[2], refs[3], refs[4]]);
+}
+
+#[test]
+fn test_reuse_after_extending_previous_skipblock() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
+
+    for &idx in &[2usize, 3, 4] {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let a = h.insert(100);
+    let b = h.insert(101);
+    let c = h.insert(102);
+
+    assert_eq!([a, b, c], [refs[2], refs[3], refs[4]]);
+}
+
+#[test]
+fn test_reuse_after_merging_two_skipblocks() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(8, 8)).unwrap();
+    let refs: Vec<*const i32> = (0..8).map(|i| h.insert(i)).collect();
+
+    for &idx in &[2usize, 4, 3] {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let a = h.insert(100);
+    let b = h.insert(101);
+    let c = h.insert(102);
+
+    assert_eq!([a, b, c], [refs[2], refs[3], refs[4]]);
+}
+
+#[test]
+fn test_reuse_pointer_set_after_fragmented_erases() {
+    let mut h = Hive::try_new(BlockCapacityLimits::new(16, 16)).unwrap();
+    let refs: Vec<*const i32> = (0..16).map(|i| h.insert(i)).collect();
+    let erased = [1usize, 2, 5, 8, 9, 10, 14];
+
+    for &idx in &erased {
+        unsafe {
+            h.erase(refs[idx]);
+        }
+    }
+
+    let mut reused: Vec<*const i32> = (0..erased.len())
+        .map(|i| h.insert(100 + i as i32))
+        .collect();
+    let mut expected: Vec<*const i32> = erased.iter().map(|&idx| refs[idx]).collect();
+    reused.sort();
+    expected.sort();
+
+    assert_eq!(reused, expected);
+}
