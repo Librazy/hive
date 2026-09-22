@@ -151,6 +151,7 @@ struct HugeElement {
     data: [u64; 1024],
 }
 
+#[cfg(target_os = "linux")]
 impl HugeElement {
     fn new(i: usize) -> Self {
         let mut data = [0u64; 1024];
