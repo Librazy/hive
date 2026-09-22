@@ -84,9 +84,18 @@ impl<T, A: Allocator> Group<T, A> {
 
         let elem_layout = Layout::from_size_align(alloc_size, Self::allocation_align())
             .expect("hive: invalid element layout");
-        let alloc_block = allocator
-            .allocate(elem_layout)
-            .expect("hive: element block allocation failed");
+        let alloc_block = match allocator.allocate(elem_layout) {
+            Ok(block) => block,
+            Err(_) => {
+                // The group header has not been initialized yet, but its
+                // allocation must still be released if the data allocation
+                // fails.
+                unsafe {
+                    allocator.deallocate(group_ptr.cast::<u8>(), group_layout);
+                }
+                panic!("hive: element block allocation failed");
+            }
+        };
 
         let allocation: NonNull<u8> = alloc_block.cast::<u8>();
 

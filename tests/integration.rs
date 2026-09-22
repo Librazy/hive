@@ -1,6 +1,6 @@
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
-use hive::allocator::Global;
+use hive::allocator::{AllocError, Allocator, Global};
 #[cfg(feature = "std")]
 use hive::SyncPool;
 use hive::{BlockCapacityLimits, Hive, IncompatibleSplice, Pool};
@@ -14,6 +14,53 @@ use std::pin::Pin;
 #[cfg(feature = "pin-init")]
 use std::ptr;
 use std::rc::Rc;
+
+#[test]
+fn test_data_allocation_failure_releases_group_header() {
+    use std::alloc::{alloc, dealloc, Layout};
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct FailSecondAllocation {
+        allocations: Arc<AtomicUsize>,
+        deallocations: Arc<AtomicUsize>,
+    }
+
+    unsafe impl Allocator for FailSecondAllocation {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            if self.allocations.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(AllocError);
+            }
+
+            let ptr = NonNull::new(unsafe { alloc(layout) }).ok_or(AllocError)?;
+            Ok(NonNull::slice_from_raw_parts(ptr, layout.size()))
+        }
+
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            self.deallocations.fetch_add(1, Ordering::SeqCst);
+            unsafe { dealloc(ptr.as_ptr(), layout) };
+        }
+    }
+
+    let allocations = Arc::new(AtomicUsize::new(0));
+    let deallocations = Arc::new(AtomicUsize::new(0));
+    let allocator = FailSecondAllocation {
+        allocations: allocations.clone(),
+        deallocations: deallocations.clone(),
+    };
+    let mut hive = Hive::<u32, _>::new_in(allocator);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hive.insert(1);
+    }));
+
+    assert!(result.is_err());
+    assert!(hive.is_empty());
+    assert_eq!(allocations.load(Ordering::SeqCst), 2);
+    assert_eq!(deallocations.load(Ordering::SeqCst), 1);
+}
 
 #[cfg(feature = "pin-init")]
 use pin_init::{init_from_closure, InitResult, PinUninit};
