@@ -917,9 +917,9 @@ fn test_small_type_reuse_near_u8_capacity_limit() {
     let mut h = Hive::try_new(BlockCapacityLimits::new(255, 255)).unwrap();
     let refs: Vec<*const u8> = (0..255).map(|i| h.insert(i as u8)).collect();
 
-    for idx in 100..255 {
+    for &ptr in refs.iter().skip(100) {
         unsafe {
-            h.erase(refs[idx]);
+            h.erase(ptr);
         }
     }
 

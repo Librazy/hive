@@ -52,8 +52,8 @@ struct HugeElement {
 impl HugeElement {
     fn new(i: usize) -> Self {
         let mut data = [0u64; 1024];
-        for j in 0..1024 {
-            data[j] = i as u64 + j as u64;
+        for (j, value) in data.iter_mut().enumerate() {
+            *value = i as u64 + j as u64;
         }
         Self { data }
     }
