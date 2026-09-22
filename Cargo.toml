@@ -10,7 +10,9 @@ default = ["std"]
 std = []
 allocator_api = ["pin-init?/alloc"]
 pin-init = ["dep:pin-init", "pin-init/alloc_pin_with"]
-safe_object_pool_custom_allocator = []
+
+# For examples/safe_object_pool.rs
+safe_object_pool_custom_allocator = ["allocator_api"]
 
 [dependencies]
 pin-init = { version = "0.2", default-features = false, optional = true }
