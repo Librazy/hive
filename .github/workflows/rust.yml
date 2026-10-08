@@ -41,6 +41,10 @@ jobs:
       matrix:
         os: [linux, windows, macos]
         arch: [amd64, i686, aarch64]
+        exclude:
+          # Miri cannot initialize std for the legacy i686 macOS target.
+          - os: macos
+            arch: i686
         include:
           - os: linux
             arch: amd64
@@ -70,10 +74,6 @@ jobs:
             arch: amd64
             runner: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos
-            arch: i686
-            runner: macos-15-intel
-            target: i686-apple-darwin
           - os: macos
             arch: aarch64
             runner: macos-15-intel
