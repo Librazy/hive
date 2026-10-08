@@ -10,18 +10,18 @@ default = ["std"]
 std = []
 allocator_api = ["pin-init?/alloc"]
 pin-init = ["dep:pin-init", "pin-init/alloc_pin_with"]
+# Keeps benchmark-only dependencies out of normal and Miri test builds.
+benchmarks = ["dep:criterion", "dep:gungraun"]
 
 # For examples/safe_object_pool.rs
 safe_object_pool_custom_allocator = ["allocator_api"]
 
 [dependencies]
 pin-init = { version = "0.2", default-features = false, optional = true }
+criterion = { version = "0.8.2", features = ["html_reports"], optional = true }
 
-[dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-gungraun = "0.19.0"
+[target.'cfg(target_os = "linux")'.dependencies]
+gungraun = { version = "0.19.0", optional = true }
 
 [profile.bench]
 debug = true
@@ -29,7 +29,9 @@ debug = true
 [[bench]]
 name = "comparison"
 harness = false
+required-features = ["benchmarks"]
 
 [[bench]]
 name = "gungraun_comparison"
 harness = false
+required-features = ["benchmarks"]

@@ -10,13 +10,76 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  clippy:
     runs-on: ubuntu-latest
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: std
+            features: --features std,benchmarks
+          - name: no-std
+            features: --no-default-features --features benchmarks
+          - name: no-std + pin-init
+            features: --no-default-features --features pin-init,benchmarks
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+    - name: Clippy (${{ matrix.name }})
+      run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
     - name: Run tests
       run: cargo test --verbose
+
+  miri:
+    name: Miri (${{ matrix.os }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, macos]
+        arch: [amd64, i686, aarch64]
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: linux
+            arch: i686
+            runner: ubuntu-latest
+            target: i686-unknown-linux-gnu
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows
+            arch: i686
+            runner: windows-latest
+            target: i686-pc-windows-msvc
+          - os: windows
+            arch: aarch64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+          - os: macos
+            arch: amd64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos
+            arch: i686
+            runner: macos-15-intel
+            target: i686-apple-darwin
+          - os: macos
+            arch: aarch64
+            runner: macos-15-intel
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run Miri
+      run: cargo miri test --target ${{ matrix.target }} --verbose
