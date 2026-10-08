@@ -66,6 +66,12 @@ extern crate std;
 
 extern crate alloc;
 
+// Keep benchmark-only optional dependencies out of Miri test builds.
+#[cfg(feature = "benchmarks")]
+use criterion as _;
+#[cfg(all(feature = "benchmarks", target_os = "linux"))]
+use gungraun as _;
+
 pub mod allocator;
 mod free_list;
 mod group;

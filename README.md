@@ -85,7 +85,7 @@ cargo +nightly test --features allocator_api
 ## Benchmarks
 
 ```sh
-cargo bench --bench comparison
+cargo bench --features benchmarks --bench comparison
 ```
 
 Benchmarks compare `Hive` against `Vec`, `VecDeque`, and `LinkedList`.
@@ -94,7 +94,7 @@ Benchmarks compare `Hive` against `Vec`, `VecDeque`, and `LinkedList`.
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features benchmarks -- -D warnings
 cargo test
 ```
 
