@@ -625,8 +625,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             return;
         };
         let gp = tail.as_ptr();
+        assert_eq!(self.end.group, Some(tail), "end cursor must belong to tail");
         let end_index = (*gp).index_from_element_ptr(self.end.element);
-        let distance = (*gp).capacity - end_index;
+        let distance = (*gp)
+            .capacity
+            .checked_sub(end_index)
+            .expect("end cursor exceeds tail capacity");
         if distance == 0 {
             return;
         }
@@ -689,6 +693,12 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             (*n.as_ptr()).prev = prev;
         } else {
             self.tail = prev;
+            // Former non-tail groups have a fully constructed or erased range.
+            // Preserve its boundary so erased suffix slots stay on the free list.
+            self.end = match prev {
+                Some(tail) => Self::end_cursor_of(tail, (*tail.as_ptr()).capacity),
+                None => null_cursor(),
+            };
         }
         if has_erasures {
             self.remove_from_erasures_list(group);
@@ -1496,14 +1506,14 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
                     self.begin = null_cursor();
                     self.end = null_cursor();
                 } else {
-                    self.begin = Self::begin_cursor_of(self.head.unwrap());
-                    let mut b = self.begin;
-                    while unsafe { (*b.group.unwrap().as_ptr()).read_index_at(b.skipfield) != 0 }
-                        && self.len > 0
-                    {
-                        b = b.advance_forward();
-                    }
-                    self.begin = b;
+                    let head = self.head.unwrap();
+                    let g = head.as_ref();
+                    let first = g.skipfield_at(0) as usize;
+                    self.begin = make_cursor(
+                        head,
+                        g.elements_base().add(first * g.slot_size),
+                        g.skipfield_ptr_at(first),
+                    );
                 }
             }
         }

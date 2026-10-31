@@ -62,7 +62,10 @@ impl<T, A: Allocator> Group<T, A> {
     }
 
     pub(crate) fn compute_allocation_size(capacity: u16, slot_size: usize) -> usize {
-        slot_size * capacity as usize + Self::index_size() * (capacity as usize + 1)
+        slot_size
+            .checked_mul(capacity as usize)
+            .and_then(|elements| elements.checked_add(Self::index_size() * (capacity as usize + 1)))
+            .expect("hive: element allocation size overflow")
     }
 
     pub(crate) fn allocate(
@@ -76,14 +79,15 @@ impl<T, A: Allocator> Group<T, A> {
         let slot_size = Self::compute_slot_size();
         let alloc_size = Self::compute_allocation_size(capacity, slot_size);
 
+        // Reject invalid layouts before allocating the header, avoiding a leak.
+        let elem_layout = Layout::from_size_align(alloc_size, Self::allocation_align())
+            .expect("hive: invalid element layout");
         let group_layout = Layout::new::<Group<T, A>>();
         let group_ptr = allocator
             .allocate(group_layout)
             .expect("hive: group allocation failed")
             .cast::<Group<T, A>>();
 
-        let elem_layout = Layout::from_size_align(alloc_size, Self::allocation_align())
-            .expect("hive: invalid element layout");
         let alloc_block = match allocator.allocate(elem_layout) {
             Ok(block) => block,
             Err(_) => {
@@ -241,5 +245,23 @@ impl<T, A: Allocator> Group<T, A> {
         let offset_bytes = ptr.offset_from(self.elements_base());
         debug_assert!(offset_bytes >= 0);
         (offset_bytes as usize / self.slot_size) as u16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Group;
+    use crate::allocator::Global;
+
+    #[test]
+    #[should_panic(expected = "element allocation size overflow")]
+    fn allocation_size_rejects_multiplication_overflow() {
+        Group::<u32, Global>::compute_allocation_size(2, usize::MAX / 2 + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "element allocation size overflow")]
+    fn allocation_size_rejects_addition_overflow() {
+        Group::<u32, Global>::compute_allocation_size(1, usize::MAX - 1);
     }
 }

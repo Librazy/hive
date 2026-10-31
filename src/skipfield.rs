@@ -109,23 +109,15 @@ impl<T, A: Allocator> Cursor<T, A> {
         let slot_size = g.slot_size;
         let sf_idx = self.skipfield.offset_from(sf_base) as usize / Group::<T, A>::index_size();
 
-        let (group, elem, sf) = if sf_idx > 0 {
-            let prev_val = g.skipfield_at(sf_idx - 1);
-            if prev_val == 0 {
-                let ni = sf_idx - 1;
-                (
-                    self.group,
-                    elem_base.add(ni * slot_size),
-                    g.skipfield_ptr_at(ni),
-                )
-            } else {
-                let ni = sf_idx - 1 - prev_val as usize;
-                (
-                    self.group,
-                    elem_base.add(ni * slot_size),
-                    g.skipfield_ptr_at(ni),
-                )
-            }
+        let previous_index = sf_idx
+            .checked_sub(1)
+            .and_then(|idx| idx.checked_sub(g.skipfield_at(idx) as usize));
+        let (group, elem, sf) = if let Some(ni) = previous_index {
+            (
+                self.group,
+                elem_base.add(ni * slot_size),
+                g.skipfield_ptr_at(ni),
+            )
         } else {
             let prev = g.prev.expect("retreated past begin");
             let pg = prev.as_ref();
@@ -149,23 +141,18 @@ impl<T, A: Allocator> Cursor<T, A> {
 
 unsafe fn find_last_active<T, A: Allocator>(g: &Group<T, A>) -> (*const u8, usize) {
     let cap = g.capacity as usize;
-    let mut idx = cap;
+    // Former non-tail groups are fully constructed or have their unused
+    // suffix marked erased by splice.
+    let mut idx = cap.checked_sub(1).expect("empty group");
     loop {
-        debug_assert!(idx > 0, "no active elements in group");
-        idx -= 1;
         let v = g.skipfield_at(idx);
-        if v != 0 {
-            idx -= v as usize;
-        } else {
-            if idx + 1 < cap && g.skipfield_at(idx + 1) != 0 {
-                let run_len = g.skipfield_at(idx + 1);
-                let run_start = (idx + 1).saturating_sub(run_len as usize);
-                if idx > run_start {
-                    idx = run_start;
-                    continue;
-                }
-            }
+        if v == 0 {
             return (g.skipfield_ptr_at(idx), idx);
         }
+        // The jump lands on the preceding live slot; inspect it without
+        // another decrement, including when it is slot zero.
+        idx = idx
+            .checked_sub(v as usize)
+            .expect("no active elements in group");
     }
 }
