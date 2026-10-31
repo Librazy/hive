@@ -506,8 +506,9 @@ impl<T, A: Allocator> IntoIterator for Hive<T, A> {
         let end = self.end;
         let head = self.head;
         let reserved_groups = self.reserved_groups;
-        core::mem::forget(self);
-        unsafe { IntoIter::new(begin, end, len, head, reserved_groups) }
+        let this = ManuallyDrop::new(self);
+        let allocator = unsafe { core::ptr::read(&this.allocator) };
+        unsafe { IntoIter::new(begin, end, len, head, reserved_groups, allocator) }
     }
 }
 
@@ -773,22 +774,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     }
 
     fn deallocate_without_dropping_elements(self) {
-        let old = ManuallyDrop::new(self);
-        unsafe {
-            let mut g = old.head;
-            while let Some(group) = g {
-                let next = (*group.as_ptr()).next;
-                Group::deallocate_group(group);
-                g = next;
-            }
-
-            let mut g = old.reserved_groups;
-            while let Some(group) = g {
-                let next = (*group.as_ptr()).next;
-                Group::deallocate_group(group);
-                g = next;
-            }
-        }
+        debug_assert_eq!(self.len, 0);
+        drop(self);
     }
 }
 
@@ -1484,7 +1471,28 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
             "element already erased"
         );
 
+        // Commit erasure only after drop glue finishes, including on unwind.
+        struct FinishErase<'a, T, A: Allocator + Clone> {
+            hive: &'a mut Hive<T, A>,
+            group: NonNull<Group<T, A>>,
+            index: u16,
+        }
+        impl<T, A: Allocator + Clone> Drop for FinishErase<'_, T, A> {
+            fn drop(&mut self) {
+                unsafe { self.hive.finish_erase(self.group, self.index) }
+            }
+        }
+        let _finish = FinishErase {
+            hive: self,
+            group,
+            index,
+        };
         element_ptr.drop_in_place();
+    }
+
+    unsafe fn finish_erase(&mut self, group: NonNull<Group<T, A>>, index: u16) {
+        let gp = group.as_ptr();
+        let byte_ptr = (*gp).element_ptr(index) as *const u8;
         self.len -= 1;
         let new_active = (*gp).active_count - 1;
         (*gp).active_count = new_active;
@@ -1528,9 +1536,8 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     ///
     /// # Panic safety
     ///
-    /// If an element destructor panics, the hive may still mark already-dropped
-    /// slots as live. Do not rely on recovering and continuing to use the hive
-    /// after `T::drop` panics during `clear`.
+    /// If an element destructor panics, that element is removed and the hive
+    /// remains valid. Elements not yet visited remain in the hive.
     ///
     /// # Examples
     ///
@@ -1545,45 +1552,9 @@ impl<T, A: Allocator + Clone> Hive<T, A> {
     /// assert_eq!(hive.len(), 0);
     /// ```
     pub fn clear(&mut self) {
-        if self.len == 0 {
-            return;
+        while self.len != 0 {
+            unsafe { self.erase_raw(self.begin.element as *mut T) };
         }
-        unsafe {
-            let mut cur = self.begin;
-            let count = self.len;
-            for i in 0..count {
-                let gp = cur.group.unwrap().as_ptr();
-                let idx = (*gp).index_from_element_ptr(cur.element);
-                (*gp).element_ptr_mut(idx).drop_in_place();
-                if i + 1 < count {
-                    cur = cur.advance_forward();
-                }
-            }
-        }
-        let mut g = self.head;
-        while let Some(group) = g {
-            unsafe {
-                let gp = group.as_ptr();
-                let next = (*gp).next;
-                (*gp).active_count = 0;
-                (*gp).free_list_head = Group::<T, A>::none_index();
-                (*gp).erasures_next = None;
-                (*gp).erasures_prev = None;
-                (*gp).next = self.reserved_groups;
-                (*gp).prev = None;
-                let cap = (*gp).capacity as usize;
-                core::ptr::write_bytes((*gp).skipfield_mut(), 0, cap * Group::<T, A>::index_size());
-                self.reserved_groups = Some(group);
-                g = next;
-            }
-        }
-        self.head = None;
-        self.tail = None;
-        self.lookup_hint.set(None);
-        self.begin = null_cursor();
-        self.end = null_cursor();
-        self.erasure_groups_head = None;
-        self.len = 0;
     }
 
     /// Keeps only the elements for which `f` returns `true`.
