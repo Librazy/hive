@@ -70,9 +70,7 @@ pub struct Pool<T, A: Allocator + Clone = Global> {
 /// # Panic safety
 ///
 /// Dropping a guard erases its element from the pool. If `T::drop` panics while
-/// the guard is being dropped, the backing hive may still mark that slot as
-/// live. Do not rely on recovering and continuing to use the pool after an
-/// element destructor panics during guard drop.
+/// the guard is being dropped, its slot is still removed during unwinding.
 pub struct Pooled<'a, T, A: Allocator + Clone = Global> {
     pool: &'a Pool<T, A>,
     ptr: NonNull<T>,
@@ -310,9 +308,7 @@ pub struct SyncPool<T, A: Allocator + Clone = Global> {
 /// # Panic safety
 ///
 /// Dropping a guard erases its element from the pool. If `T::drop` panics while
-/// the guard is being dropped, the backing hive may still mark that slot as
-/// live. Do not rely on recovering and continuing to use the pool after an
-/// element destructor panics during guard drop.
+/// the guard is being dropped, its slot is still removed during unwinding.
 #[cfg(feature = "std")]
 pub struct SyncPooled<T, A: Allocator + Clone = Global> {
     hive: Arc<Mutex<Hive<T, A>>>,

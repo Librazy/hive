@@ -177,6 +177,7 @@ pub struct IntoIter<T, A: Allocator> {
     remaining: usize,
     head: Option<NonNull<Group<T, A>>>,
     reserved_groups: Option<NonNull<Group<T, A>>>,
+    _allocator: A,
     _marker: PhantomData<T>,
 }
 
@@ -187,6 +188,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
         len: usize,
         head: Option<NonNull<Group<T, A>>>,
         reserved_groups: Option<NonNull<Group<T, A>>>,
+        allocator: A,
     ) -> Self {
         let back = if len == 0 {
             end
@@ -199,6 +201,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
             remaining: len,
             head,
             reserved_groups,
+            _allocator: allocator,
             _marker: PhantomData,
         }
     }

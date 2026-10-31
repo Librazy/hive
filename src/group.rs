@@ -147,7 +147,9 @@ impl<T, A: Allocator> Group<T, A> {
         let g = this.as_ref();
         g.deallocate_data();
         let group_layout = Layout::new::<Group<T, A>>();
-        g.allocator.deallocate(this.cast::<u8>(), group_layout);
+        // Move the allocator out before releasing its storage.
+        let allocator = core::ptr::read(&g.allocator);
+        allocator.deallocate(this.cast::<u8>(), group_layout);
     }
 
     pub(crate) unsafe fn reset(
